@@ -1,10 +1,10 @@
 **`MYCloudKit`** is a framework designed to simplify and automate CloudKit syncing, deletion, and fetching operations for your app. This guide explains how to integrate and use the various features of `MYCloudKit`.
 
-# 🛠 Getting Your Model Ready to Sync
+## 🛠 Getting Your Model Ready to Sync
 
 To sync your models with CloudKit using **`MYCloudKit`**, you must conform them to the **`MYRecordConvertible`** protocol. This enables the sync engine to understand how to convert your custom data types into CKRecords.
 
-#### ✅ Step-by-step Guide
+### ✅ Step-by-step Guide
 
 1. **Conform Your Model to `MYRecordConvertible`** 
 
@@ -31,7 +31,7 @@ If A is the parent of B and B is the parent of C, sharing A would share A, B and
 
 Use the `myProperties` dictionary to define each field using `MYRecordValue` (e.g. .string, .bool, .reference, etc.).
 
-#### Example: Syncing a Task Model
+### Example: Syncing a Task Model
 
 ```swift
 struct Task: MYRecordConvertible {
@@ -56,7 +56,7 @@ struct Task: MYRecordConvertible {
 
 > ✅ With this setup, `MYCloudKit` knows how to save, update, delete, and share your Task model in CloudKit.
 
-# Steps for Syncing, Deleting, and Fetching
+## Steps for Syncing, Deleting, and Fetching
 
 1. Set Up MYSyncEngine
 
@@ -116,7 +116,7 @@ You can observe the fetchState to track whether the fetch operation is in progre
 
 For apps that support sharing, `MYCloudKit` integrates with CloudKit’s `CKShare` feature. You can create shares at the record level (for individual records and their nested records using a proper child-parent hierarchy) or zone level (for whole groups of records).
 
-#### Example of creating a share for a Task:
+### Example of creating a share for a Task:
 
 ```swift
 let (share, container) = try await syncEngine.createShare(with: "Shared Task List", for: task)
@@ -149,7 +149,7 @@ You’ll implement methods to:
 - Recover from sync failures by correcting broken records
 - Provide the list of record types your app uses (in order of dependency)
 
-#### Record Type Order Matters
+### Record Type Order Matters
 
 The most important method is:
 
@@ -168,7 +168,7 @@ return [
 ]
 }
 
-#### ✅ Example:
+### ✅ Example:
 
 ```swift
 func syncableRecordTypesInDependencyOrder() -> [MYRecordType] {
