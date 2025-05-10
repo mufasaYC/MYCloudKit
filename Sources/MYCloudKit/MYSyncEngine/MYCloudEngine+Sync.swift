@@ -215,7 +215,7 @@ extension MYSyncEngine {
             case .zoneNotFound, .userDeletedZone:
                 reason = "None"
                 errorKind = .retryWithoutError
-                assertionFailure(error.localizedDescription)
+                    logger.log(reason, error: error)
             
             // Retryable errors — transient issues like network/server problems
             case .accountTemporarilyUnavailable, .networkUnavailable, .networkFailure,
@@ -228,7 +228,6 @@ extension MYSyncEngine {
             case .badContainer, .badDatabase, .missingEntitlement:
                 reason = "None"
                 errorKind = .retryWithoutError
-                assertionFailure(error.localizedDescription)
 
             // Invalid data — usually due to unsynced references
             case .invalidArguments:
@@ -254,7 +253,6 @@ extension MYSyncEngine {
             case .alreadyShared, .participantMayNeedVerification, .tooManyParticipants:
                 reason = "Share failure — should not apply to transactions."
                 errorKind = .dontSyncThis
-                assertionFailure(error.localizedDescription)
 
             // Asset issues — usually should’ve been cleaned up after successful sync
             case .assetFileNotFound, .assetFileModified, .assetNotAvailable:
@@ -265,7 +263,6 @@ extension MYSyncEngine {
             case .serverRecordChanged:
                 reason = "Record conflict between server and device."
                 errorKind = .retryWithError
-                assertionFailure(error.localizedDescription)
 
             // Referenced record is missing in CloudKit
             case .referenceViolation:
@@ -327,6 +324,8 @@ extension MYSyncEngine {
             reason = error.localizedDescription
             errorKind = .retryWithError
         }
+        
+        logger.log(reason, error: error)
 
         /// Removes the transaction from the queue and informs the delegate.
         /// If the error was due to missing references, re-enqueues those first.
@@ -347,7 +346,7 @@ extension MYSyncEngine {
                     queue.remove(at: index)
                 }
             } else {
-                assertionFailure("Transaction not found in queue.")
+                logger.log("🤔 Transaction not found in queue", level: .error)
             }
         }
 
@@ -365,7 +364,7 @@ extension MYSyncEngine {
                     queue[index].attempts += 1
                 }
             } else {
-                assertionFailure("Transaction not found in queue.")
+                logger.log("🤔 Transaction not found in queue", level: .error)
             }
 
         case .dontSyncThis:

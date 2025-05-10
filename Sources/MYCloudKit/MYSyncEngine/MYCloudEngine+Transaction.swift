@@ -97,7 +97,7 @@ extension MYSyncEngine.Transaction {
         ///     1. The zone of any referenced records (if cached),
         ///     2. A predefined `zoneName` that we get from `groupID` from `MYRecordConvertible`, or
         ///     3. A fallback default zone named `"MYiCloudZone"`.
-        ///   - If decoding the saved system fields fails, an `assertionFailure` is triggered to help with debugging.
+        ///
         func baseCKRecord(
             for recordReferencingRecordNames: [String] = [],
             using cache: Cache
@@ -106,7 +106,10 @@ extension MYSyncEngine.Transaction {
                 if let record = CKRecord(data: encodedSystemFields) {
                     return record
                 } else {
-                    assertionFailure("unable to reconstruct the CKRecord from the previous encodedSystemFields")
+                    cache.logger.log(
+                        "Unable to reconstruct the CKRecord from the previous encodedSystemFields",
+                        level: .warning
+                    )
                 }
             }
             

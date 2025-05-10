@@ -16,7 +16,7 @@ extension MYSyncEngine {
     /// - Note: This method is marked with `@MainActor` to ensure that `fetchState` updates happen on the main thread.
     @MainActor
     public func fetch() async {
-        guard let delegate else {
+        guard delegate != nil else {
             assertionFailure("MYSyncDelegate must be set before fetching data, otherwise you won't be able to save the fetched data.")
             return
         }
@@ -124,7 +124,12 @@ extension MYSyncEngine {
                 result in
                 switch result {
                     case .success((let serverChangeToken, _, let moreComing)):
-                        assert(!moreComing, "Unexpected: moreComing should be false")
+                        if moreComing {
+                            self?.logger.log(
+                                "Unexpected: moreComing should be false, kindly report this issue",
+                                level: .warning
+                            )
+                        }
                         newZoneServerChangeToken[zoneID] = serverChangeToken
                     case .failure(let error):
                         if let ckError = error as? CKError,

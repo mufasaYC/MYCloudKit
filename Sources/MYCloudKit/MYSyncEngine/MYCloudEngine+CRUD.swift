@@ -45,7 +45,7 @@ extension MYSyncEngine {
                             properties.updateValue(.asset(url), forKey: key)
                         } catch {
                             // If there is an error in saving the asset data, log the error
-                            assertionFailure(error.localizedDescription)
+                            logger.log("📁 Error in saving the asset data", error: error)
                         }
                     }
                 case .fileURL(let url):
@@ -85,7 +85,10 @@ extension MYSyncEngine {
     /// - Note: Make sure the `myRecordType` is defined in the `syncableRecordTypesInDependencyOrder()`
     public func sync(_ record: any MYRecordConvertible) {
         if let delegate {
-            assert(delegate.syncableRecordTypesInDependencyOrder().contains(record.myRecordType))
+            assert(
+                delegate.syncableRecordTypesInDependencyOrder().contains(record.myRecordType),
+                "\(record.myRecordType) is not mentioned in MYSyncDelegate's `syncableRecordTypesInDependencyOrder()`"
+            )
         }
         
         // Get the transaction for creating or updating the record
@@ -110,7 +113,10 @@ extension MYSyncEngine {
     ///   Set it to `true` if you this record is the `myParentID` for other records and you want them to all be cascade deleted.
     public func delete(_ record: any MYRecordConvertible, shouldDeleteChildRecords: Bool = false) {
         if let delegate {
-            assert(delegate.syncableRecordTypesInDependencyOrder().contains(record.myRecordType))
+            assert(
+                delegate.syncableRecordTypesInDependencyOrder().contains(record.myRecordType),
+                "\(record.myRecordType) is not mentioned in MYSyncDelegate's `syncableRecordTypesInDependencyOrder()`"
+            )
         }
         
         let transactionRecord: Transaction.Record = .init(

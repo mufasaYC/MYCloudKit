@@ -11,14 +11,7 @@ extension MYSyncEngine {
         typealias Transaction = MYSyncEngine.Transaction
         
         // Main cache folder in the app's documents directory
-        private var cacheDirectoryURL: URL {
-            let documentDirectory = FileManager.default.urls(
-                for: .documentDirectory,
-                in: .userDomainMask
-            ).first!
-            
-            return documentDirectory.appendingPathComponent("MYCloudKit")
-        }
+        private let cacheDirectoryURL: URL
         
         private var transactionQueueFileURL: URL {
             cacheDirectoryURL.appendingPathComponent("transaction_cache.json")
@@ -33,8 +26,24 @@ extension MYSyncEngine {
         }
         
         private let fileManager: FileManager = .default
+        let logger: Logger
         
-        init() {
+        init(suiteName: String?, logger: Logger) {
+            let documentDirectory: URL
+            
+            if let suiteName,
+                    let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: suiteName) {
+                documentDirectory = containerURL
+            } else {
+                documentDirectory = FileManager.default.urls(
+                    for: .documentDirectory,
+                    in: .userDomainMask
+                ).first!
+            }
+            
+            self.cacheDirectoryURL = documentDirectory.appendingPathComponent("MYCloudKit")
+            self.logger = logger
+            
             // Ensure cache directory exists
             if !fileManager.fileExists(atPath: cacheDirectoryURL.path) {
                 try? fileManager.createDirectory(at: cacheDirectoryURL, withIntermediateDirectories: true)
@@ -57,7 +66,7 @@ extension MYSyncEngine.Cache {
             let data = try JSONEncoder().encode(transactions)
             try data.write(to: transactionQueueFileURL, options: .atomic)
         } catch {
-            assertionFailure(error.localizedDescription)
+            logger.log("🛑 Failed to cache transaction queue", error: error)
         }
     }
     
@@ -102,7 +111,7 @@ extension MYSyncEngine.Cache {
                 try fileManager.removeItem(atPath: url.path)
             }
         } catch {
-            assertionFailure(error.localizedDescription)
+            logger.log("🛑 Failed to remove cache for transaction", error: error)
         }
     }
 }
@@ -118,7 +127,7 @@ extension MYSyncEngine.Cache {
         do {
             try data.write(to: url)
         } catch {
-            assertionFailure(error.localizedDescription)
+            logger.log("🛑 Failed to save encoded system fields for record (\(recordName))", error: error)
         }
     }
 
@@ -156,7 +165,7 @@ extension MYSyncEngine.Cache {
             let data = try JSONEncoder().encode(zones)
             try data.write(to: zoneIDsFileURL, options: .atomic)
         } catch {
-            assertionFailure(error.localizedDescription)
+            logger.log("🛑 Failed to save zoneIDs", error: error)
         }
     }
 

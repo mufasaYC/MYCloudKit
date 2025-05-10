@@ -128,10 +128,11 @@ public final class MYSyncEngine: ObservableObject {
         maxRetryAttempts: Int = 3,
         logLevel: LogLevel = .debug
     ) {
-        let syncCache: Cache = .init()
+        let logger = Logger(currentLevel: logLevel)
+        let syncCache: Cache = .init(suiteName: userDefaultsSuiteName, logger: logger)
         self.cache = syncCache
         self.queue = syncCache.retrieveTransactionQueue()
-        self.logger = Logger(currentLevel: logLevel)
+        self.logger = logger
         // Set the CKContainer to either custom or default.
         if let containerIdentifier {
             self.logger.log(
