@@ -83,6 +83,7 @@ syncEngine.sync(task)
 ```
 
 > It is your responsibility to sync data sensibly. Don't sync a newly created Task first and then the Project it belongs to (provided it has never been synced) which is conceptually incorrect. A new Project should be synced first and then the newly created Task. This is to ensure that Project that the Task to reference in CloudKit is already present before it (either in the queue or in CloudKit itself).
+> Currently the logic is that the last write wins, in a future commit we will allow you to resolve the conflict via the `MYSyncDelegate`.
 
 3. Deleting Records
 
@@ -193,6 +194,9 @@ func handleUnsyncableRecord(recordID: String, recordType: String, reason: String
     return nil
 }
 ```
+
+## Sample app with `MYCloudKit`
+[Bad Habit Tracker App](https://github.com/mufasaYC/Bad-Habits)
 
 ## ☁️ Built with Care
 
