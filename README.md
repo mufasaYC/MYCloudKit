@@ -1,5 +1,3 @@
-# **MYCloudKit Documentation**
-
 **`MYCloudKit`** is a framework designed to simplify and automate CloudKit syncing, deletion, and fetching operations for your app. This guide explains how to integrate and use the various features of `MYCloudKit`.
 
 # 🛠 Getting Your Model Ready to Sync
