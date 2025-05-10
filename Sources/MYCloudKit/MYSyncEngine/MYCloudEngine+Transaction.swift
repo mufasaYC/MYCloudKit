@@ -96,7 +96,7 @@ extension MYSyncEngine.Transaction {
         ///   - If no system fields are available, the zone is determined based on:
         ///     1. The zone of any referenced records (if cached),
         ///     2. A predefined `zoneName` that we get from `groupID` from `MYRecordConvertible`, or
-        ///     3. A fallback default zone named `"MYiCloudZone"`.
+        ///     3. A fallback default zone named `"MYCloudKitDefaultZone"`.
         ///
         func baseCKRecord(
             for recordReferencingRecordNames: [String] = [],
@@ -134,7 +134,7 @@ extension MYSyncEngine.Transaction {
                     zoneID = .init(zoneName: zoneName)
                 }
             } else {
-                zoneID = .init(zoneName: "MYiCloudZone")
+                zoneID = .init(zoneName: "MYCloudKitDefaultZone")
             }
             
             return .init(
