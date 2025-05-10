@@ -65,6 +65,7 @@ extension MYSyncEngine {
         
         /// The number of retry attempts made while processing this transaction. Once this is equal to `maxAttempts` passed in the `init` of `MYCloudEngine`, it will be notified via `MYCloudEngineDelegate` and removed from the queue
         var attempts: Int = .zero
+        var createdAt: Date = .now
     }
 }
 
@@ -74,7 +75,6 @@ extension MYSyncEngine.Transaction {
         let recordType: String
         let zoneName: String?
         let parentRecordName: String?
-        
         
         /// Builds the base `CKRecord` for the current model, using any previously saved system fields if available.
         ///
