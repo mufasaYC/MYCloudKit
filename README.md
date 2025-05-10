@@ -17,7 +17,7 @@ Add protocol conformance to your struct or class.
 
 This lets you group related records (like all tasks in a project) into a CloudKit zone. Especially useful when sharing.
 
->> If you project has tasks, tags, subtasks and more other such models, make sure everyone's `myRootGroupID` is the `projectID`.
+> If you project has tasks, tags, subtasks and more other such models, make sure everyone's `myRootGroupID` is the `projectID`.
 
 1. **Define Hierarchies with `myParentID`** (optional)
 
@@ -25,7 +25,7 @@ Use this to model parent-child relationships like folders and files.
 
 If A is the parent of B and B is the parent of C, sharing A would share A, B and C. Sharing B would only share B and C.
 
->> Prefer `.reference(...)` in `myProperties` unless you specifically want record-level sharing.
+> Prefer `.reference(...)` in `myProperties` unless you specifically want record-level sharing.
 
 1. **Map Properties to CloudKit-Compatible Values**
 
