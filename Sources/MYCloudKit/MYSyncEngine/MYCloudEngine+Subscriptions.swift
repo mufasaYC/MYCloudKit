@@ -19,9 +19,19 @@ extension MYSyncEngine {
         guard !userDefaults.didSaveSubscription(for: scope) else {
             return
         }
+        
+        let prefix: String
+        switch scope {
+            case .private:
+                prefix = "Private"
+            case .shared:
+                prefix = "Shared"
+            default:
+                return
+        }
 
         // Create a unique subscription for the scope
-        let subscription = CKDatabaseSubscription(subscriptionID: "changes-\(scope.rawValue)")
+        let subscription = CKDatabaseSubscription(subscriptionID: "MYCloudKit\(prefix)DatabaseSubscription")
 
         // Configure for silent push (no alert, badge, or sound)
         let notification = CKSubscription.NotificationInfo()
