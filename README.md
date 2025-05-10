@@ -10,16 +10,16 @@ To sync your models with CloudKit using **`MYCloudKit`**, you must conform them 
 
 Add protocol conformance to your struct or class.
 
-1. **Implement Record Identification**
+2. **Implement Record Identification**
     - `myRecordID`: A unique identifier (e.g., UUID or your model’s primary key).
     - `myRecordType`: The record type (e.g., "Task", "Note").
-1. **Group Records with `myRootGroupID`** (optional)
+3. **Group Records with `myRootGroupID`** (optional)
 
 This lets you group related records (like all tasks in a project) into a CloudKit zone. Especially useful when sharing.
 
 > If you project has tasks, tags, subtasks and more other such models, make sure everyone's `myRootGroupID` is the `projectID`.
 
-1. **Define Hierarchies with `myParentID`** (optional)
+4. **Define Hierarchies with `myParentID`** (optional)
 
 Use this to model parent-child relationships like folders and files. 
 
@@ -27,7 +27,7 @@ If A is the parent of B and B is the parent of C, sharing A would share A, B and
 
 > Prefer `.reference(...)` in `myProperties` unless you specifically want record-level sharing.
 
-1. **Map Properties to CloudKit-Compatible Values**
+5. **Map Properties to CloudKit-Compatible Values**
 
 Use the `myProperties` dictionary to define each field using `MYRecordValue` (e.g. .string, .bool, .reference, etc.).
 
