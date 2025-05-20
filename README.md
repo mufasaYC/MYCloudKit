@@ -195,6 +195,26 @@ func handleUnsyncableRecord(recordID: String, recordType: String, reason: String
 }
 ```
 
+8. Receiving Push Notifications
+
+To ensure your app stays in sync with remote changes (e.g., when another device modifies shared records), make sure to call `.fetch()` on the `MYSyncEngine` when your app receives a CloudKit push notification.
+
+This is especially important for background and foreground updates.
+
+### ✅ Example: Handle Push in AppDelegate
+
+```swift
+func application(
+    _ application: UIApplication,
+    didReceiveRemoteNotification userInfo: [AnyHashable : Any]
+) async -> UIBackgroundFetchResult {
+    await AppState.shared.syncEngine.fetch()
+    return .newData
+}
+```
+> Note: These push notifications aren't received on simulator. Works only on a real device. 
+> This allows your app to stay updated by fetching the latest changes from CloudKit as soon as a silent push notification is received. MYCloudKit automatically sets up silent push notifications to be fired when any records are changes in the user's private or shared database.
+
 ## Sample app with `MYCloudKit`
 [Bad Habit Tracker App](https://github.com/mufasaYC/Bad-Habits)
 
