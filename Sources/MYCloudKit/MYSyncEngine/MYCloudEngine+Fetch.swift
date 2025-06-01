@@ -384,7 +384,7 @@ extension MYSyncEngine {
         /// Returns a typed value for the given key from the record's properties.
         ///
         /// This method performs type-safe matching based on the expected return type `T`.
-        /// It supports `Int`, `Double`, `Float`, `Bool`, `Date`, `URL`, `String`, and `String` for reference IDs.
+        /// It supports `Int`, `Double`, `Float`, `Bool`, `Date`, `URL`, `String`, and `String` for reference IDs and `URL` for files/images/videos or other binary data that you might have synced
         ///
         /// - Parameter key: The key for which to retrieve the value.
         /// - Returns: A value of type `T` if the key exists and the type matches; otherwise, `nil`.
@@ -393,9 +393,17 @@ extension MYSyncEngine {
         /// ```swift
         /// let name: String? = record.value(for: "name")
         /// let createdAt: Date? = record.value(for: "createdAt")
+        /// let file: URL? = record.value(for: "file")
+        /// let childReference: String? = record.value(for: "child_record_id")
         /// ```
         public func value<T>(for key: String) -> T? {
-            ckRecord.value(forKey: key) as? T
+            if let asset = ckRecord[key] as? CKAsset {
+                return asset.fileURL as? T
+            } else if let reference = ckRecord[key] as? CKRecord.Reference {
+                return reference.recordID.recordName as? T
+            }
+            
+            return ckRecord.value(forKey: key) as? T
         }
         
         // MARK: - Initializer
