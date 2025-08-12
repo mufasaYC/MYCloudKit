@@ -3,6 +3,7 @@
 //
 
 import CloudKit
+import UIKit
 
 /// `MYSyncEngine` is the core engine responsible for managing all CloudKit sync operations.
 ///
@@ -63,6 +64,8 @@ public final class MYSyncEngine: ObservableObject {
     /// The maximum number of retry attempts for failed sync operations.
     let maxRetryAttempts: Int
     
+    private var syncWorkItem: DispatchWorkItem? = nil
+    
     /// Represents the state of a sync operation.
     public enum SyncState {
         case idle
@@ -113,7 +116,11 @@ public final class MYSyncEngine: ObservableObject {
     }
     
     /// Optional delegate to receive sync lifecycle callbacks.
-    public weak var delegate: MYSyncDelegate?
+    public weak var delegate: MYSyncDelegate? {
+        didSet {
+            self.willEnterForegroundNotification()
+        }
+    }
     
     /// Initializes a new `MYCloudEngine` instance.
     ///
@@ -169,7 +176,53 @@ public final class MYSyncEngine: ObservableObject {
         self.subscribeToChanges(in: .private)
         self.subscribeToChanges(in: .shared)
         
-        // Start the initial sync operation.
-        self.sync()
+        #if !os(watchOS)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(willEnterForegroundNotification),
+            name: UIApplication.willEnterForegroundNotification,
+            object: nil
+        )
+        #endif
+    }
+    
+    @objc
+    private func willEnterForegroundNotification() {
+        Task {
+            await self.beginFetch()
+            await self.beginSync()
+        }
+    }
+    
+    @MainActor
+    public func beginSync() {
+        guard !syncState.isActive, !queue.isEmpty else {
+            return
+        }
+        self.syncState = .syncing(queueCount: queue.count)
+        Task { @MainActor in
+            self.syncState = await sync()
+            self.beginSync()
+        }
+    }
+    
+    @MainActor
+    public func beginFetch() async {
+        guard !fetchState.isActive else {
+            return
+        }
+        self.fetchState = .fetching
+        self.fetchState = await fetch()
+    }
+    
+    func queueUpdated() {
+        syncWorkItem?.cancel()
+        let workItem: DispatchWorkItem = .init {
+            Task { [weak self] in
+                await self?.beginSync()
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(400), execute: workItem)
+        self.syncWorkItem = workItem
     }
 }

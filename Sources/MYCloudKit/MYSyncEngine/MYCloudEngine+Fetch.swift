@@ -14,14 +14,11 @@ extension MYSyncEngine {
     /// - If an error occurs during the fetch, it logs the error and updates the state to `.stopped` with the error.
     ///
     /// - Note: This method is marked with `@MainActor` to ensure that `fetchState` updates happen on the main thread.
-    @MainActor
-    public func fetch() async {
+    public func fetch() async -> FetchState {
         guard delegate != nil else {
             assertionFailure("MYSyncDelegate must be set before fetching data, otherwise you won't be able to save the fetched data.")
-            return
+            return .idle
         }
-        // Set the fetch state to indicate fetching has started
-        self.fetchState = .fetching
         
         do {
             // Attempt to fetch data from the private CloudKit database
@@ -31,14 +28,14 @@ extension MYSyncEngine {
             try await self.fetch(in: .shared)
             
             // If both fetches succeed, update the fetch state with completion time
-            self.fetchState = .completed(date: .now)
+            return .completed(date: .now)
         } catch {
             // Log the error and update the fetch state to indicate failure
             self.logger.log(
                 "🛑 Fetch operation failed",
                 error: error
             )
-            self.fetchState = .stopped(error: error)
+            return .stopped(error: error)
         }
     }
     
@@ -132,10 +129,13 @@ extension MYSyncEngine {
                         }
                         newZoneServerChangeToken[zoneID] = serverChangeToken
                     case .failure(let error):
-                        if let ckError = error as? CKError,
-                           ckError.code == .changeTokenExpired {
-                            // Reset token if expired
-                            self?.userDefaults.setServerChangeToken(nil, for: zoneID)
+                        if let ckError = error as? CKError {
+                            if ckError.code == .changeTokenExpired {
+                                // Reset token if expired
+                                self?.userDefaults.setServerChangeToken(nil, for: zoneID)
+                            } else if ckError.code == .zoneNotFound || ckError.code == .userDeletedZone {
+                                self?.cache.deleteZoneID(zoneID)
+                            }
                         }
                         self?.logger.log(
                             "⚠️ Failed to fetch changes for zone '\(zoneID.zoneName)'",
@@ -190,9 +190,15 @@ extension MYSyncEngine {
         }
         
         // Step 5: Apply the changes to local storage
-        self.recordsToSave(recordsToSave)
-        self.recordsToDelete(recordIDsToDelete)
-        self.updateZoneIDsCache(newZoneIDs: newZoneIDs, deletedZoneIDs: deletedZoneIDs)
+        guard await self.recordsToSave(recordsToSave) else {
+            return
+        }
+        guard await self.recordsToDelete(recordIDsToDelete) else {
+            return
+        }
+        guard await self.updateZoneIDsCache(newZoneIDs: newZoneIDs, deletedZoneIDs: deletedZoneIDs) else {
+            return
+        }
         
         // Step 6: Persist the new tokens for next sync
         userDefaults.setPreviousServerChangeToken(for: scope, databaseChangeToken)
@@ -215,9 +221,9 @@ extension MYSyncEngine {
     /// 4. Caches the encoded system fields of each record for future use.
     ///
     /// - Parameter records: An array of `CKRecord` objects that have been saved.
-    func recordsToSave(_ records: [CKRecord]) {
+    func recordsToSave(_ records: [CKRecord]) async -> Bool {
         guard !records.isEmpty else {
-            return
+            return true
         }
 
         // Group records by their type and convert them into internal Record representations.
@@ -246,7 +252,9 @@ extension MYSyncEngine {
         }
 
         // Notify the delegate about the records to save.
-        delegate?.didReceiveRecordsToSave(orderedRecords)
+        guard let didSave = await delegate?.didReceiveRecordsToSave(orderedRecords), didSave else {
+            return false
+        }
 
         // Cache system fields for each record by record ID.
         records.forEach { record in
@@ -255,6 +263,8 @@ extension MYSyncEngine {
                 for: record.recordID.recordName
             )
         }
+        
+        return true
     }
     
     /// Processes and handles a list of CKRecord identifiers that were successfully deleted.
@@ -270,9 +280,9 @@ extension MYSyncEngine {
             record: CKRecord.ID,
             recordType: CKRecord.RecordType
         )]
-    ) {
+    ) async -> Bool {
         guard !records.isEmpty else {
-            return
+            return true
         }
 
         // Convert CKRecord.IDs to simple string-based tuples.
@@ -289,7 +299,11 @@ extension MYSyncEngine {
         }
 
         // Notify the delegate about the records to delete.
-        delegate?.didReceiveRecordsToDelete(mappedRecords)
+        guard let didSave = await delegate?.didReceiveRecordsToDelete(mappedRecords) else {
+            return false
+        }
+        
+        return didSave
     }
     
     
@@ -303,9 +317,9 @@ extension MYSyncEngine {
     /// - Parameters:
     ///   - newZoneIDs: An array of `CKRecordZone.ID` objects representing newly fetched zones.
     ///   - deletedZoneIDs: An array of `CKRecordZone.ID` objects representing zones that have been deleted.
-    func updateZoneIDsCache(newZoneIDs: [CKRecordZone.ID], deletedZoneIDs: [CKRecordZone.ID]) {
+    func updateZoneIDsCache(newZoneIDs: [CKRecordZone.ID], deletedZoneIDs: [CKRecordZone.ID]) async -> Bool {
         guard !newZoneIDs.isEmpty || !deletedZoneIDs.isEmpty else {
-            return
+            return true
         }
 
         // Log how many zones were fetched and deleted.
@@ -320,7 +334,9 @@ extension MYSyncEngine {
 
         // Inform the delegate about group IDs to delete, using the zone names.
         let deletedGroupIDs = deletedZoneIDs.map { $0.zoneName }
-        self.delegate?.didReceiveGroupIDsToDelete(deletedGroupIDs)
+        guard let didSave = await self.delegate?.didReceiveGroupIDsToDelete(deletedGroupIDs), didSave else {
+            return false
+        }
 
         // Retrieve and update the locally cached zone IDs.
         var existingZoneIDs = cache.getZoneIDs()
@@ -334,6 +350,7 @@ extension MYSyncEngine {
 
         // Save the updated zone list back into cache.
         self.cache.setZoneIDs(existingZoneIDs)
+        return true
     }
 }
 
@@ -398,9 +415,18 @@ extension MYSyncEngine {
         /// ```
         public func value<T>(for key: String) -> T? {
             if let asset = ckRecord[key] as? CKAsset {
-                return asset.fileURL as? T
+                if let fileURL = asset.fileURL {
+                    if let expectedReturn = asset.fileURL as? T {
+                        return expectedReturn
+                    } else if let expectedReturn = try? Data(contentsOf: fileURL) as? T {
+                        return expectedReturn
+                    }
+                }
             } else if let reference = ckRecord[key] as? CKRecord.Reference {
                 return reference.recordID.recordName as? T
+            } else if let references = ckRecord[key] as? [CKRecord.Reference],
+                      let result = references.map({ $0.recordID.recordName }) as? T {
+                return result
             }
             
             return ckRecord.value(forKey: key) as? T

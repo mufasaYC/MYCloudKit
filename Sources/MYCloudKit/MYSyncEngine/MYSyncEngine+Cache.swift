@@ -179,4 +179,13 @@ extension MYSyncEngine.Cache {
             return []
         }
     }
+    
+    func deleteZoneID(_ zoneID: CKRecordZone.ID) {
+        var newZoneIDs = getZoneIDs()
+        guard let index = newZoneIDs.firstIndex(of: zoneID) else {
+            return
+        }
+        newZoneIDs.remove(at: index)
+        setZoneIDs(newZoneIDs)
+    }
 }

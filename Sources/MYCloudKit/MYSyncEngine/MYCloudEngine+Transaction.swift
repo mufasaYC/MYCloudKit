@@ -45,7 +45,7 @@ extension MYSyncEngine {
         }
         
         /// The supported data types that can be stored in a `CKRecord` field.
-        enum RecordValue: Hashable, Codable {
+        indirect enum RecordValue: Hashable, Codable {
             case int(Int?)
             case double(Double?)
             case float(Float?)
@@ -56,12 +56,13 @@ extension MYSyncEngine {
             
             /// Represents a reference to another record, with an associated delete rule.
             case reference(Record?, deleteRule: MYRecordValue.DeleteRule)
+            case array([RecordValue])
         }
         
         let id: UUID
         let operationType: OperationType
         let record: Record
-        var properties: [String: RecordValue]
+        var properties: [String: RecordValue?]
         
         /// The number of retry attempts made while processing this transaction. Once this is equal to `maxAttempts` passed in the `init` of `MYCloudEngine`, it will be notified via `MYCloudEngineDelegate` and removed from the queue
         var attempts: Int = .zero
@@ -258,6 +259,45 @@ extension MYSyncEngine.Transaction {
                     } else {
                         ckRecord[key] = nil
                     }
+                case .array(let values):
+                    var items: [Any] = []
+                    for value in values {
+                        switch value {
+                            case .int(let int):
+                                if let int {
+                                    items.append(int)
+                                }
+                            case .double(let double):
+                                if let double {
+                                    items.append(double)
+                                }
+                            case .bool(let bool):
+                                if let bool {
+                                    items.append(bool)
+                                }
+                            case .date(let date):
+                                if let date {
+                                    items.append(date)
+                                }
+                            case .string(let string):
+                                if let string {
+                                    items.append(string)
+                                }
+                            case .reference(let referencedRecord, let deleteRule):
+                                if let referencedRecord {
+                                    let recordID = referencedRecord.baseCKRecord(using: cache).recordID
+                                    items.append(CKRecord.Reference.init(
+                                        recordID: recordID,
+                                        action: deleteRule.referenceAction
+                                    ))
+                                }
+                            case .array, .float, .asset:
+                                assertionFailure()
+                        }
+                    }
+                    ckRecord[key] = items as NSArray
+                case .none:
+                    ckRecord[key] = nil
             }
         }
 
