@@ -116,9 +116,7 @@ extension MYSyncEngine {
             operation.fetchAllChanges = true
             
             // Called when a zone fetch completes
-            operation.recordZoneFetchResultBlock = {
-                [weak self] zoneID,
-                result in
+            operation.recordZoneFetchResultBlock = { [weak self] zoneID, result in
                 switch result {
                     case .success((let serverChangeToken, _, let moreComing)):
                         if moreComing {
@@ -146,9 +144,7 @@ extension MYSyncEngine {
             }
             
             // Called for each changed record
-            operation.recordWasChangedBlock = {
-                [weak self] recordID,
-                result in
+            operation.recordWasChangedBlock = { [weak self] recordID, result in
                 switch result {
                     case .success(let record):
                         recordsToSave.append(record)
