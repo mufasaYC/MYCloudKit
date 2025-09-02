@@ -49,7 +49,7 @@ extension MYSyncEngine {
         var shareRecord: CKShare
 
         // Reuse existing share if one already exists
-        if let existingShareID = ckRecord.share?.recordID,
+        if let existingShareID = await database.getShareRecordId(ckRecord: ckRecord),
            let existingShare = try? await database.record(for: existingShareID) as? CKShare {
             shareRecord = existingShare
         } else if ckRecord.recordID.recordName == ckRecord.recordID.zoneID.zoneName {
@@ -83,7 +83,7 @@ extension MYSyncEngine {
 
         throw NSError(domain: "MYSync", code: 404, userInfo: [NSLocalizedDescriptionKey: "Failed to save or locate CKShare"])
     }
-
+    
     /// Accepts a shared CloudKit record and fetches updated shared data.
     ///
     /// - Parameter metadata: The `CKShare.Metadata` received via the SceneDelegate.
@@ -111,5 +111,14 @@ extension MYSyncEngine {
 
         // Refresh local shared records
         try await fetch(in: .shared)
+    }
+}
+
+private extension CKDatabase {
+    func getShareRecordId(ckRecord: CKRecord) async -> CKRecord.ID? {
+        if let existingShareID = ckRecord.share?.recordID {
+            return existingShareID
+        }
+        return try? await record(for: ckRecord.recordID).share?.recordID
     }
 }
