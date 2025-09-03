@@ -119,6 +119,6 @@ private extension CKDatabase {
         if let existingShareID = ckRecord.share?.recordID {
             return existingShareID
         }
-        return try? await record(for: ckRecord.recordID).share?.recordID
+        return try? await record(for: .init(recordName: CKRecordNameZoneWideShare, zoneID: ckRecord.recordID.zoneID)).recordID
     }
 }
