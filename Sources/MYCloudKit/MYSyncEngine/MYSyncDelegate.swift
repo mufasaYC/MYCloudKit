@@ -63,17 +63,17 @@ public protocol MYSyncDelegate: AnyObject {
     /// Called when new or updated records are ready to be saved locally.
     ///
     /// - Parameter records: A dictionary where the key is the record type and the value is an array of `MYCloudEngine.Record` instances to be saved.
-    func didReceiveRecordsToSave(_ records: [MYSyncEngine.FetchedRecord])
+    func didReceiveRecordsToSave(_ records: [MYSyncEngine.FetchedRecord]) async -> Bool
     
     /// Called when specific records need to be deleted from local storage.
     ///
     /// - Parameter records: An array of tuples containing `myRecordID` and `myRecordType`, identifying which records to delete.
-    func didReceiveRecordsToDelete(_ records: [(myRecordID: String, myRecordType: MYRecordType)])
+    func didReceiveRecordsToDelete(_ records: [(myRecordID: String, myRecordType: MYRecordType)]) async -> Bool
     
     /// Called when entire record groups need to be removed (e.g. shared zones or logical groupings, this is basically anything that could have been the `rootGroupID`).
     ///
     /// - Parameter ids: An array of group identifiers that should be deleted from the local store.
-    func didReceiveGroupIDsToDelete(_ ids: [String])
+    func didReceiveGroupIDsToDelete(_ ids: [String]) async -> Bool
     
     /// Called when a specific record could not be synced successfully, allowing the delegate to correct and optionally retry syncing it.
     ///

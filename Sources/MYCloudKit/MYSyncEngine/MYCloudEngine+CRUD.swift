@@ -71,6 +71,67 @@ extension MYSyncEngine {
                         // In case no reference exists, set the delete rule to none
                         properties.updateValue(.reference(nil, deleteRule: .none), forKey: key)
                     }
+                case .array(let values):
+                    /// `kind` is going to see the kind of items you're adding to the array and see if it is homogeneous
+                    var kind: String? = nil
+                    var recordValues: [Transaction.RecordValue] = []
+                    for value in values {
+                        switch value {
+                            case .int(let int):
+                                if kind == nil { kind = "int" }
+                                assert(kind == "int", "array of different types is not supported")
+                                recordValues.append(.int(int))
+                            case .double(let double):
+                                if kind == nil { kind = "double" }
+                                assert(kind == "double", "array of different types is not supported")
+                                recordValues.append(.double(double))
+                            case .float(let float):
+                                if kind == nil { kind = "double" }
+                                assert(kind == "double", "array of different types is not supported")
+                                if let float {
+                                    recordValues.append(.double(Double(float)))
+                                }
+                            case .bool(let bool):
+                                if kind == nil { kind = "bool" }
+                                assert(kind == "bool", "array of different types is not supported")
+                                recordValues.append(.bool(bool))
+                            case .date(let date):
+                                if kind == nil { kind = "date" }
+                                assert(kind == "date", "array of different types is not supported")
+                                recordValues.append(.date(date))
+                            case .asset:
+                                assertionFailure("Array of data is not supported by CloudKit")
+                                continue
+                            case .fileURL:
+                                assertionFailure("Array of files is not supported by CloudKit")
+                                continue
+                            case .string(let string):
+                                if kind == nil { kind = "string" }
+                                assert(kind == "string", "array of different types is not supported")
+                                recordValues.append(.string(string))
+                            case .reference(let reference, let deleteRule):
+                                if kind == nil { kind = "reference" }
+                                assert(kind == "reference", "array of different types is not supported")
+                                if let reference {
+                                    // Creating reference for a related record and adding it to the properties
+                                    recordValues.append(
+                                        .reference(
+                                            .init(
+                                                recordName: reference.myRecordID,
+                                                recordType: reference.myRecordType,
+                                                zoneName: reference.myRootGroupID,
+                                                parentRecordName: nil
+                                            ),
+                                            deleteRule: deleteRule
+                                        )
+                                    )
+                                }
+                            case .array:
+                                assertionFailure("You're testing me? Array of arrays in CloudKit? Nice try! :P")
+                                continue
+                        }
+                    }
+                    properties.updateValue(.array(recordValues), forKey: key)
             }
         }
         
@@ -103,7 +164,7 @@ extension MYSyncEngine {
             level: .debug
         )
         
-        self.sync()
+        self.queueUpdated()
     }
     
     /// Deletes the given record and optionally deletes its child records.
@@ -166,6 +227,6 @@ extension MYSyncEngine {
             level: .debug
         )
         
-        self.sync()
+        self.queueUpdated()
     }
 }

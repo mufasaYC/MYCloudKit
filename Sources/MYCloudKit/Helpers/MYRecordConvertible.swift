@@ -9,7 +9,7 @@ import CloudKit
 ///
 /// This enum helps encode your data for storage in `CKRecord`.
 ///
-public enum MYRecordValue {
+public indirect enum MYRecordValue {
     case int(Int?)
     case double(Double?)
     case float(Float?)
@@ -21,6 +21,8 @@ public enum MYRecordValue {
     
     /// Represents a reference to another record conforming to `MYRecordConvertible`, along with its deletion behavior.
     case reference((any MYRecordConvertible)?, deleteRule: DeleteRule)
+    /// Allowing arrays of
+    case array([MYRecordValue])
 
     /// Specifies how a reference behaves when the target record is deleted.
     public enum DeleteRule: Codable {

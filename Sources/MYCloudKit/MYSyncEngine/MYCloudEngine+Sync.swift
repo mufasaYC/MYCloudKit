@@ -17,171 +17,320 @@ extension MYSyncEngine {
     ///
     /// The method updates `syncState` to reflect the current progress and handles retries, caching, and errors.
 
-    func sync() {
-        /// Linear sync to avoid `CKReference` issues:
-        /// if a record references another that hasn’t been uploaded, CloudKit will fail.
-        guard !syncState.isActive else {
-            return
+    func sync() async -> SyncState {
+        /// Batch sync in order of what is returned in `MYSyncDelegate.syncableRecordTypesInDependencyOrder()`
+        guard let orderedRecordTypes = delegate?.syncableRecordTypesInDependencyOrder(),
+              !orderedRecordTypes.isEmpty else {
+            assertionFailure("MYSyncDelegate must be set before syncing data, and `syncableRecordTypesInDependencyOrder` must not return an empty array")
+            return .idle
         }
         
-        guard let transaction = queue.first else {
-            return
-        }
+        var syncingRecordType: String = ""
+        var batchedPrivateTransactions: [[Transaction]] = []
+        var batchedSharedTransactions: [[Transaction]] = []
         
-        Task { @MainActor [weak self] in
-            guard let self else {
-                return
-            }
+        for recordType in orderedRecordTypes {
+            var privateTransactions: [Transaction] = []
+            var sharedTransactions: [Transaction] = []
             
-            /// Convert the transaction to a `CKRecord`. If conversion fails, remove from queue and retry.
-            guard let ckRecord = transaction.asCKRecord(using: self.cache) else {
-                self.handleError(NSError(domain: "Cannot parse CKRecord", code: 500), for: transaction)
-                self.sync()
-                return
-            }
-            
-            let databaseScope = transaction.databaseScope(using: cache)
-            let database = self.ckContainer.database(with: databaseScope)
-            self.syncState = .syncing(queueCount: self.queue.count)
-            
-            var retry = false
-            var lastError: Error?
-            
-            do {
-                switch transaction.operationType {
-                        
-                    case .createOrUpdate:
-                        self.logger.log(
-                            "🌀 Syncing record '\(ckRecord.recordType)' (\(ckRecord.recordID.recordName))",
-                            level: .debug
-                        )
-
-                        let result = try await database.modifyRecords(
-                            saving: [ckRecord],
-                            deleting: [],
-                            savePolicy: .allKeys
-                        )
-
-                        if let (_, value) = result.saveResults.first {
-                            switch value {
-                                case .success(let record):
-                                    /// Save system fields for future use (for efficient delta sync, conflict resolution, etc.)
-                                    self.cache.saveEncodedSystemFields(
-                                        data: record.encodedSystemFields,
-                                        for: record.recordID.recordName
-                                    )
-                                    self.logger.log(
-                                        "✅ Successfully synced '\(ckRecord.recordType)' (\(ckRecord.recordID.recordName))",
-                                        level: .debug
-                                    )
-
-                                case .failure(let error):
-                                    lastError = error
-
-                                    if let error = error as? CKError {
-                                        switch error.code {
-                                            case .zoneNotFound, .userDeletedZone:
-                                                /// Zone missing – likely first time syncing. Create it and retry.
-                                                self.logger.log(
-                                                    "📦 Zone '\(ckRecord.recordID.zoneID.zoneName)' not found — attempting to create it",
-                                                    level: .warning
-                                                )
-                                                do {
-                                                    try await database.save(.init(zoneID: ckRecord.recordID.zoneID))
-                                                    self.logger.log(
-                                                        "✅ Created zone '\(ckRecord.recordID.zoneID.zoneName)'",
-                                                        level: .debug
-                                                    )
-                                                    retry = true
-                                                } catch {
-                                                    self.logger.log(
-                                                        "🛑 Failed to create zone '\(ckRecord.recordID.zoneID.zoneName)'",
-                                                        error: error
-                                                    )
-                                                    self.handleError(error, for: transaction)
-                                                }
-                                            default:
-                                                self.logger.log(
-                                                    "🛑 Failed to sync '\(ckRecord.recordType)' (\(ckRecord.recordID.recordName))",
-                                                    error: error
-                                                )
-                                                self.handleError(error, for: transaction)
-                                        }
-                                    } else {
-                                        self.logger.log(
-                                            "🛑 Failed to sync '\(ckRecord.recordType)' (\(ckRecord.recordID.recordName))",
-                                            error: error
-                                        )
-                                        self.handleError(error, for: transaction)
-                                    }
-                            }
-                        }
-
-                    case .deleteRecord:
-                        self.logger.log(
-                            "🗑️ Deleting record '\(ckRecord.recordID.recordName)'",
-                            level: .debug
-                        )
-                        try await database.deleteRecord(withID: ckRecord.recordID)
-                        self.logger.log(
-                            "✅ Successfully deleted '\(ckRecord.recordType)' (\(ckRecord.recordID.recordName))",
-                            level: .debug
-                        )
-
-                    case .deleteChildRecords:
-                        self.logger.log(
-                            "🧹 Deleting child records for '\(ckRecord.recordID.recordName)'",
-                            level: .debug
-                        )
-                        try await cascadeDeleteChildRecords(
-                            for: ckRecord.recordID,
-                            in: databaseScope
-                        )
-                        self.logger.log(
-                            "✅ Successfully deleted child records for '\(ckRecord.recordID.recordName)'",
-                            level: .debug
-                        )
-
-                    case .deleteZone:
-                        self.logger.log(
-                            "🗑️ Deleting zone '\(ckRecord.recordID.zoneID.zoneName)'",
-                            level: .debug
-                        )
-                        try await database.deleteRecordZone(withID: ckRecord.recordID.zoneID)
-                        self.logger.log(
-                            "✅ Successfully deleted zone '\(ckRecord.recordID.zoneID.zoneName)'",
-                            level: .debug
-                        )
+            for transaction in self.queue {
+                if transaction.record.recordType == recordType {
+                    switch transaction.databaseScope(using: cache) {
+                        case .private:
+                            privateTransactions.append(transaction)
+                        case .shared:
+                            sharedTransactions.append(transaction)
+                        default:
+                            assertionFailure("Unsupported database scope")
+                    }
                 }
-                
-            } catch {
-                lastError = error
-                self.logger.log(
-                    "🛑 Transaction failed during sync",
-                    error: error
-                )
+            }
+            
+            if privateTransactions.isEmpty && sharedTransactions.isEmpty {
+                /// good, continue to the next record type sync all that depend on it are synced
+            } else {
+                syncingRecordType = recordType
+                batchedPrivateTransactions.append(contentsOf: privateTransactions.chunked(into: 200))
+                batchedSharedTransactions.append(contentsOf: sharedTransactions.chunked(into: 200))
+                /// break so that all these record types can be synced and their errors handled before syncing any records that might depend on it
+                break
+            }
+        }
+        let batchedTransactions = batchedPrivateTransactions + batchedSharedTransactions
+        var transactionsCompleted: [Transaction] = []
+        var transactionsFailed: [Transaction: Error] = [:]
+        for transactions in batchedTransactions {
+            guard let databaseScope = transactions.first?.databaseScope(using: cache) else {
+                continue
+            }
+            let database = ckContainer.database(with: databaseScope)
+            var recordIDTransactionMap: [CKRecord.ID: Transaction] = [:]
+            var zoneIDTransactionMap: [CKRecordZone.ID: Transaction] = [:]
+            var recordsToSave: [CKRecord] = []
+            var recordsToDelete: [CKRecord.ID] = []
+            var zonesToDelete: [CKRecordZone.ID] = []
+            var recordsToCascadeDelete: [CKRecord.ID] = []
+            
+            for transaction in transactions {
+                /// Convert the transaction to a `CKRecord`. If conversion fails, remove from queue and retry.
+                guard let ckRecord = transaction.asCKRecord(using: self.cache) else {
+                    self.handleError(NSError(domain: "Cannot parse CKRecord", code: 500), for: transaction)
+                    continue
+                }
+                switch transaction.operationType {
+                    case .createOrUpdate:
+                        if recordIDTransactionMap[ckRecord.recordID] == nil {
+                            recordsToSave.append(ckRecord)
+                            recordIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID)
+                        }
+                    case .deleteZone:
+                        if zoneIDTransactionMap[ckRecord.recordID.zoneID] == nil {
+                            zonesToDelete.append(ckRecord.recordID.zoneID)
+                            zoneIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID.zoneID)
+                        }
+                    case .deleteRecord:
+                        if recordIDTransactionMap[ckRecord.recordID] == nil {
+                            recordsToDelete.append(ckRecord.recordID)
+                            recordIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID)
+                        }
+                    case .deleteChildRecords:
+                        recordsToCascadeDelete.append(ckRecord.recordID)
+                        recordIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID)
+                }
+            }
+            
+            self.logger.log(
+                "🌀 Syncing \(recordsToSave.count) '\(syncingRecordType)'\n🗑️ Deleting \(recordsToDelete.count) '\(syncingRecordType)'",
+                level: .debug
+            )
+            var missingZoneIDs: [CKRecordZone.ID] = []
+            
+            
+            // MARK: Save & Delete Records
+            if !recordsToSave.isEmpty || !recordsToDelete.isEmpty {
+                /// making sure if there is a save and delete in the same request, respect the delete and mark the save as completed
+                recordsToSave.forEach { record in
+                    if let index = recordsToDelete.firstIndex(of: record.recordID) {
+                        recordsToSave.remove(at: index)
+                        if let transaction = recordIDTransactionMap[record.recordID] {
+                            transactionsCompleted.append(transaction)
+                        } else {
+                            assertionFailure("How?")
+                        }
+                    }
+                }
+                do {
+                    let modifyRecordsResult = try await database.modifyRecords(
+                        saving: recordsToSave,
+                        deleting: recordsToDelete,
+                        savePolicy: .allKeys,
+                        atomically: false
+                    )
+                    
+                    var successSavesCount: Int = .zero
+                    var failureSavesCount: Int = .zero
+                    
+                    var successDeleteCount: Int = .zero
+                    var failureDeleteCount: Int = .zero
+                    
+                    for result in modifyRecordsResult.saveResults {
+                        let recordID = result.key
+                        guard let transaction = recordIDTransactionMap[recordID] else {
+                            assertionFailure("How?")
+                            continue
+                        }
+                        switch result.value {
+                            case .success(let record):
+                                self.cache.saveEncodedSystemFields(
+                                    data: record.encodedSystemFields,
+                                    for: record.recordID.recordName
+                                )
+                                successSavesCount += 1
+                                transactionsCompleted.append(transaction)
+                            case .failure(let error):
+                                if let error = error as? CKError {
+                                    switch error.code {
+                                        case .zoneNotFound, .userDeletedZone:
+                                            /// Zone missing – likely first time syncing. Create it and retry.
+                                            self.logger.log(
+                                                "📦 Zone '\(recordID.zoneID.zoneName)' not found — attempting to create it",
+                                                level: .warning
+                                            )
+                                            if !missingZoneIDs.contains(recordID.zoneID) {
+                                                missingZoneIDs.append(recordID.zoneID)
+                                            }
+                                        default:
+                                            transactionsFailed.updateValue(error, forKey: transaction)
+                                            failureSavesCount += 1
+                                    }
+                                } else {
+                                    transactionsFailed.updateValue(error, forKey: transaction)
+                                    failureSavesCount += 1
+                                }
+                        }
+                    }
+                    
+                    if successSavesCount > 0 {
+                        self.logger.log(
+                            "✅ Successfully synced \(successSavesCount) '\(recordsToSave.first?.recordType ?? "Unknown")'",
+                            level: .debug
+                        )
+                    }
+                    
+                    if failureDeleteCount > 0 {
+                        self.logger.log(
+                            "🛑 Failed to sync \(failureDeleteCount) '\(recordsToSave.first?.recordType ?? "Unknown")'",
+                        )
+                    }
+                    
+                    for result in modifyRecordsResult.deleteResults {
+                        let recordID = result.key
+                        guard let transaction = recordIDTransactionMap[recordID] else {
+                            assertionFailure("How?")
+                            continue
+                        }
+                        switch result.value {
+                            case .success:
+                                transactionsCompleted.append(transaction)
+                                successDeleteCount += 1
+                            case .failure(let error):
+                                if let error = error as? CKError {
+                                    switch error.code {
+                                        case .userDeletedZone, .permissionFailure, .zoneNotFound:
+                                            /// false positives
+                                            self.cache.removeCache(for: transaction)
+                                            successDeleteCount += 1
+                                        default:
+                                            transactionsFailed.updateValue(error, forKey: transaction)
+                                            failureDeleteCount += 1
+                                    }
+                                } else {
+                                    transactionsFailed.updateValue(error, forKey: transaction)
+                                    failureSavesCount += 1
+                                }
+                        }
+                    }
+                    
+                    if successDeleteCount > 0 {
+                        self.logger.log(
+                            "✅ Successfully deleted \(successDeleteCount) '\(syncingRecordType)'",
+                            level: .debug
+                        )
+                    }
+                    
+                    if failureDeleteCount > 0 {
+                        self.logger.log(
+                            "🛑 Failed to delete \(failureDeleteCount) '\(syncingRecordType)'",
+                        )
+                    }
+                } catch {
+                    self.logger.log(
+                        "🛑 Failed to modifyReccords for '\(syncingRecordType)'\nSave: \(recordsToSave.count)\nDelete: \(recordsToDelete)",
+                    )
+                    
+                    transactions.forEach {
+                        transactionsFailed.updateValue(error, forKey: $0)
+                    }
+                }
+            }
+            
+            // MARK: Save & Delete Zones
+            if !missingZoneIDs.isEmpty || !zonesToDelete.isEmpty {
+                /// making sure if there is a save and delete in the same request, respect the delete and mark the save as completed
+                missingZoneIDs.forEach { zoneID in
+                    if let index = zonesToDelete.firstIndex(of: zoneID) {
+                        missingZoneIDs.remove(at: index)
+                    }
+                }
+                do {
+                    let modifyRecordZonesResult = try await database.modifyRecordZones(
+                        saving: missingZoneIDs.map { .init(zoneID: $0) },
+                        deleting: zonesToDelete
+                    )
+                    for result in modifyRecordZonesResult.saveResults {
+                        let zoneID = result.key
+                        switch result.value {
+                            case .success:
+                                self.logger.log(
+                                    "✅ Created zone '\(zoneID.zoneName)'",
+                                    level: .debug
+                                )
+                            case .failure(let error):
+                                self.logger.log(
+                                    "🛑 Failed to create zone '\(zoneID.zoneName)'",
+                                    error: error
+                                )
+                        }
+                    }
+                    
+                    var successZoneDeleteCount: Int = .zero
+                    var failureZoneDeleteCount: Int = .zero
+                    for result in modifyRecordZonesResult.deleteResults {
+                        let zoneID = result.key
+                        guard let transaction = zoneIDTransactionMap[zoneID] else {
+                            assertionFailure("How?")
+                            continue
+                        }
+                        
+                        switch result.value {
+                            case .success:
+                                transactionsCompleted.append(transaction)
+                                successZoneDeleteCount += 1
+                            case .failure(let error):
+                                transactionsFailed.updateValue(error, forKey: transaction)
+                                failureZoneDeleteCount += 1
+                        }
+                    }
+                    
+                    if successZoneDeleteCount > 0 {
+                        self.logger.log(
+                            "✅ Successfully deleted \(successZoneDeleteCount) zones (\(syncingRecordType))",
+                            level: .debug
+                        )
+                    }
+                    
+                    if failureZoneDeleteCount > 0 {
+                        self.logger.log(
+                            "🛑 Failed to delete \(failureZoneDeleteCount) zones (\(syncingRecordType))",
+                        )
+                    }
+                    
+                } catch {
+                    self.logger.log(
+                        "🛑 Failed to delete \(zonesToDelete) record zones for '\(syncingRecordType)'",
+                    )
+                    transactions.forEach { transactionsFailed.updateValue(error, forKey: $0) }
+                }
+            }
+            
+            // MARK: Cascade Delete Records
+            for recordID in recordsToCascadeDelete {
+                guard let transaction = recordIDTransactionMap[recordID] else {
+                    assertionFailure("How?")
+                    continue
+                }
+                do {
+                    try await cascadeDeleteChildRecords(
+                        for: recordID,
+                        in: database.databaseScope
+                    )
+                    transactionsCompleted.append(transaction)
+                } catch {
+                    transactionsFailed.updateValue(error, forKey: transaction)
+                }
+            }
+            
+            let completedTransactionIDs = transactionsCompleted.map { $0.id }
+            transactionsFailed.forEach { transaction, error in
                 self.handleError(error, for: transaction)
             }
-            
-            /// Post-sync state update and retry logic
-            if let lastError {
-                self.syncState = .stopped(queueCount: self.queue.count, error: lastError)
-                
-                if retry {
-                    self.sync()
-                }
-                
-            } else {
-                /// Remove cache and transaction only if the sync succeeded
-                cache.removeCache(for: transaction)
-                if let index = queue.firstIndex(of: transaction) {
-                    self.queue.remove(at: index)
-                }
-                
-                self.syncState = .completed(date: .now)
-                self.sync()  // Proceed to next transaction
+            self.queue = queue.filter { !completedTransactionIDs.contains($0.id) }
+            if !transactionsFailed.isEmpty {
+                return .stopped(queueCount: queue.count, error: transactionsFailed.first?.value)
             }
         }
+        
+        return .completed(date: .now)
     }
 }
 
@@ -203,140 +352,21 @@ extension MYSyncEngine {
             case retryWithError      // Retry with error tracking and retry limit
             case dontSyncThis        // Drop from queue and attempt to recover or skip
         }
-
+        
         let reason: String
         let errorKind: KindOfError
-
-        // Special handling for CloudKit errors
-        if let error = error as? CKError {
-            switch error.code {
-            
-            // These are unexpected here — handled earlier in sync
-            case .zoneNotFound, .userDeletedZone:
-                reason = "None"
-                errorKind = .retryWithoutError
-                    logger.log(reason, error: error)
-            
-            // Retryable errors — transient issues like network/server problems
-            case .accountTemporarilyUnavailable, .networkUnavailable, .networkFailure,
-                 .serverResponseLost, .zoneBusy, .serviceUnavailable, .requestRateLimited,
-                 .operationCancelled, .notAuthenticated:
-                reason = "None"
-                errorKind = .retryWithoutError
-
-            // Setup/config errors — dev needs to fix
-            case .badContainer, .badDatabase, .missingEntitlement:
-                reason = "None"
-                errorKind = .retryWithoutError
-
-            // Invalid data — usually due to unsynced references
-            case .invalidArguments:
-                reason = "Invalid Arguments — this record has an unsynced reference. Return the referenced records and try syncing again."
-                errorKind = .dontSyncThis
-
-            // Unexpected — only one record is synced at a time
-            case .partialFailure:
-                reason = "Partial Failure — this shouldn't happen."
-                errorKind = .retryWithError
-
-            // CloudKit not supported by user's iCloud account
-            case .managedAccountRestricted:
-                reason = "User's account doesn't have access to CloudKit."
-                errorKind = .retryWithoutError
-
-            // Permissions issue for current user/account
-            case .permissionFailure:
-                reason = "User doesn't have permission to modify this record."
-                errorKind = .dontSyncThis
-
-            // Shouldn’t occur in transaction-based sync
-            case .alreadyShared, .participantMayNeedVerification, .tooManyParticipants:
-                reason = "Share failure — should not apply to transactions."
-                errorKind = .dontSyncThis
-
-            // Asset issues — usually should’ve been cleaned up after successful sync
-            case .assetFileNotFound, .assetFileModified, .assetNotAvailable:
-                reason = "Asset error — file was not found or has changed. Retry the sync."
-                errorKind = .retryWithError
-
-            // Save conflict between device and server record
-            case .serverRecordChanged:
-                reason = "Record conflict between server and device."
-                errorKind = .retryWithError
-
-            // Referenced record is missing in CloudKit
-            case .referenceViolation:
-                reason = "Reference violation — record references another that isn’t synced. Return the referenced record(s) and try again."
-                errorKind = .dontSyncThis
-
-            // Schema issues — field constraints or requirements not met
-            case .constraintViolation:
-                reason = "Constraint violation — check CloudKit Dashboard for required fields or rules not adhered to."
-                errorKind = .dontSyncThis
-
-            // iCloud quota/limit issues
-            case .quotaExceeded:
-                reason = "Quota exceeded — iCloud storage full."
-                errorKind = .retryWithoutError
-
-            case .limitExceeded:
-                reason = "Limit exceeded."
-                errorKind = .retryWithoutError
-
-            // Sync tokens no longer valid
-            case .changeTokenExpired:
-                reason = "Change token has expired."
-                errorKind = .retryWithError
-
-            // Item doesn’t exist anymore
-            case .unknownItem:
-                reason = "Unknown item — possibly deleted or inaccessible."
-                errorKind = .retryWithError
-
-            case .internalError:
-                reason = "Internal CloudKit error — rare."
-                errorKind = .retryWithoutError
-
-            case .incompatibleVersion:
-                reason = "Incompatible CloudKit version — possibly outdated Xcode or SDK."
-                errorKind = .retryWithoutError
-
-            case .resultsTruncated:
-                reason = "CloudKit response too large — truncated."
-                errorKind = .retryWithError
-
-            case .serverRejectedRequest:
-                reason = "Server rejected request multiple times."
-                errorKind = .retryWithError
-
-            case .batchRequestFailed:
-                reason = "Batch request failed — shouldn't happen (we sync one record at a time)."
-                errorKind = .retryWithError
-
-            // Catch-all for unknown CKError codes
-            @unknown default:
-                reason = "@unknown CKError — please investigate."
-                errorKind = .retryWithError
-            }
-
-        } else {
-            // Non-CKError — retry with logging
-            reason = error.localizedDescription
-            errorKind = .retryWithError
-        }
         
-        logger.log(reason, error: error)
-
         /// Removes the transaction from the queue and informs the delegate.
         /// If the error was due to missing references, re-enqueues those first.
-        func removeTransactionFromQueue() {
+        func removeTransactionFromQueue(silenty: Bool = false) {
             if let index = queue.firstIndex(of: transaction) {
-                if let recordsToSync = delegate?.handleUnsyncableRecord(
+                if !silenty,
+                   let recordsToSync = delegate?.handleUnsyncableRecord(
                     recordID: transaction.record.recordName,
                     recordType: transaction.record.recordType,
                     reason: reason,
                     error: error
-                ) {
+                   ) {
                     let transactions = recordsToSync.map { record in
                         getCreateUpdateTransaction(for: record)
                     }
@@ -349,26 +379,156 @@ extension MYSyncEngine {
                 logger.log("🤔 Transaction not found in queue", level: .error)
             }
         }
-
+        
+        // Special handling for CloudKit errors
+        if let error = error as? CKError {
+            switch error.code {
+                case .zoneNotFound, .userDeletedZone:
+                    switch transaction.operationType {
+                        case .createOrUpdate:
+                            // These are unexpected here — handled earlier in sync
+                            reason = "None"
+                            errorKind = .retryWithoutError
+                            logger.log(reason, error: error)
+                        case .deleteZone, .deleteRecord, .deleteChildRecords:
+                            // this is a success technically for delete records
+                            reason = "None"
+                            errorKind = .dontSyncThis
+                            removeTransactionFromQueue(silenty: true)
+                            return
+                    }
+                    
+                    // Retryable errors — transient issues like network/server problems
+                case .accountTemporarilyUnavailable, .networkUnavailable, .networkFailure,
+                        .serverResponseLost, .zoneBusy, .serviceUnavailable, .requestRateLimited,
+                        .operationCancelled, .notAuthenticated:
+                    reason = "None"
+                    errorKind = .retryWithoutError
+                    
+                    // Setup/config errors — dev needs to fix
+                case .badContainer, .badDatabase, .missingEntitlement:
+                    reason = "None"
+                    errorKind = .retryWithoutError
+                    
+                    // Invalid data — usually due to unsynced references
+                case .invalidArguments:
+                    reason = "Invalid Arguments — this record has an unsynced reference. Return the referenced records and try syncing again."
+                    errorKind = .dontSyncThis
+                    
+                    // Unexpected — only one record is synced at a time
+                case .partialFailure:
+                    // TODO: find out which partially failed and if not this record, mark it as success
+                    reason = "Partial Failure."
+                    errorKind = .retryWithError
+                    
+                    // CloudKit not supported by user's iCloud account
+                case .managedAccountRestricted:
+                    reason = "User's account doesn't have access to CloudKit."
+                    errorKind = .retryWithoutError
+                    
+                    // Permissions issue for current user/account
+                case .permissionFailure:
+                    reason = "User doesn't have permission to modify this record."
+                    errorKind = .dontSyncThis
+                    
+                    // Shouldn’t occur in transaction-based sync
+                case .alreadyShared, .participantMayNeedVerification, .tooManyParticipants:
+                    reason = "Share failure — should not apply to transactions."
+                    errorKind = .dontSyncThis
+                    
+                    // Asset issues — usually should’ve been cleaned up after successful sync
+                case .assetFileNotFound, .assetFileModified, .assetNotAvailable:
+                    reason = "Asset error — file was not found or has changed. Retry the sync."
+                    errorKind = .retryWithError
+                    
+                    // Save conflict between device and server record
+                case .serverRecordChanged:
+                    reason = "Record conflict between server and device."
+                    errorKind = .retryWithError
+                    
+                    // Referenced record is missing in CloudKit
+                case .referenceViolation:
+                    reason = "Reference violation — record references another that isn’t synced. Return the referenced record(s) and try again."
+                    errorKind = .dontSyncThis
+                    
+                    // Schema issues — field constraints or requirements not met
+                case .constraintViolation:
+                    reason = "Constraint violation — check CloudKit Dashboard for required fields or rules not adhered to."
+                    errorKind = .dontSyncThis
+                    
+                    // iCloud quota/limit issues
+                case .quotaExceeded:
+                    reason = "Quota exceeded — iCloud storage full."
+                    errorKind = .retryWithoutError
+                    
+                case .limitExceeded:
+                    reason = "Limit exceeded."
+                    errorKind = .retryWithoutError
+                    
+                    // Sync tokens no longer valid
+                case .changeTokenExpired:
+                    reason = "Change token has expired."
+                    errorKind = .retryWithError
+                    
+                    // Item doesn’t exist anymore
+                case .unknownItem:
+                    reason = "Unknown item — possibly deleted or inaccessible."
+                    errorKind = .retryWithError
+                    
+                case .internalError:
+                    reason = "Internal CloudKit error — rare."
+                    errorKind = .retryWithoutError
+                    
+                case .incompatibleVersion:
+                    reason = "Incompatible CloudKit version — possibly outdated Xcode or SDK."
+                    errorKind = .retryWithoutError
+                    
+                case .resultsTruncated:
+                    reason = "CloudKit response too large — truncated."
+                    errorKind = .retryWithError
+                    
+                case .serverRejectedRequest:
+                    reason = "Server rejected request multiple times."
+                    errorKind = .retryWithError
+                    
+                case .batchRequestFailed:
+                    // TODO: find out which partially failed and if not this record, mark it as success
+                    reason = "Batch request failed."
+                    errorKind = .retryWithError
+                    
+                    // Catch-all for unknown CKError codes
+                @unknown default:
+                    reason = "@unknown CKError — please investigate."
+                    errorKind = .retryWithError
+            }
+            
+        } else {
+            // Non-CKError — retry with logging
+            reason = error.localizedDescription
+            errorKind = .retryWithError
+        }
+        
+        logger.log(reason, error: error)
+        
         // Handle the error based on its category
         switch errorKind {
-        case .retryWithoutError:
-            // Do nothing, transaction stays in queue and will retry
-            break
-
-        case .retryWithError:
-            if let index = queue.firstIndex(of: transaction) {
-                if queue[index].attempts >= maxRetryAttempts {
-                    removeTransactionFromQueue()
+            case .retryWithoutError:
+                // Do nothing, transaction stays in queue and will retry
+                break
+                
+            case .retryWithError:
+                if let index = queue.firstIndex(of: transaction) {
+                    if queue[index].attempts >= maxRetryAttempts {
+                        removeTransactionFromQueue()
+                    } else {
+                        queue[index].attempts += 1
+                    }
                 } else {
-                    queue[index].attempts += 1
+                    logger.log("🤔 Transaction not found in queue", level: .error)
                 }
-            } else {
-                logger.log("🤔 Transaction not found in queue", level: .error)
-            }
-
-        case .dontSyncThis:
-            removeTransactionFromQueue()
+                
+            case .dontSyncThis:
+                removeTransactionFromQueue()
         }
     }
 }
