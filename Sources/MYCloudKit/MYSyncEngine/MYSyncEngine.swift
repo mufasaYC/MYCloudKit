@@ -3,7 +3,9 @@
 //
 
 import CloudKit
+#if canImport(UIKit)
 import UIKit
+#endif
 
 /// `MYSyncEngine` is the core engine responsible for managing all CloudKit sync operations.
 ///
@@ -107,6 +109,8 @@ public final class MYSyncEngine: ObservableObject {
     
     /// Current state of the fetch operation, published for UI observation.
     @Published public var fetchState: FetchState = .idle
+    
+    @Published public var cloudKitAccountStatus: CKAccountStatus = .available
 
     /// Queue of pending transactions to be synced.
     var queue: [Transaction] {
@@ -176,7 +180,7 @@ public final class MYSyncEngine: ObservableObject {
         self.subscribeToChanges(in: .private)
         self.subscribeToChanges(in: .shared)
         
-        #if !os(watchOS)
+        #if canImport(UIKit) && !os(watchOS)
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(willEnterForegroundNotification),
@@ -189,6 +193,9 @@ public final class MYSyncEngine: ObservableObject {
     @objc
     private func willEnterForegroundNotification() {
         Task {
+            if cloudKitAccountStatus != .available {
+                self.cloudKitAccountStatus =  try await ckContainer.accountStatus()
+            }
             await self.beginFetch()
             await self.beginSync()
         }
@@ -224,5 +231,22 @@ public final class MYSyncEngine: ObservableObject {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(400), execute: workItem)
         self.syncWorkItem = workItem
+    }
+    
+    func interceptError(_ error: Error) {
+        guard let ckError = error as? CKError else {
+            return
+        }
+        
+        switch ckError.code {
+            case .managedAccountRestricted:
+                self.cloudKitAccountStatus = .restricted
+            case .notAuthenticated:
+                self.cloudKitAccountStatus = .noAccount
+            case .accountTemporarilyUnavailable:
+                self.cloudKitAccountStatus = .temporarilyUnavailable
+            default:
+                break
+        }
     }
 }

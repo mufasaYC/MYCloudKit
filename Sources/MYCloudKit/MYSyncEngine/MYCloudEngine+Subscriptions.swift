@@ -14,7 +14,9 @@ extension MYSyncEngine {
     ///
     /// - Parameter scope: The `CKDatabase.Scope` to subscribe to (e.g., `.private`, `.shared`).
     func subscribeToChanges(in scope: CKDatabase.Scope) {
-        
+        guard cloudKitAccountStatus == .available else {
+            return
+        }
         // Avoid re-subscribing if already done
         guard !userDefaults.didSaveSubscription(for: scope) else {
             return
@@ -59,6 +61,7 @@ extension MYSyncEngine {
                 userDefaults.setSavedSubscription(for: scope)
 
             } catch {
+                self.interceptError(error)
                 self.logger.log(
                     "🛑 Failed to subscribe to record changes in '\(scope.name)' scope",
                     error: error

@@ -18,6 +18,12 @@ extension MYSyncEngine {
     /// The method updates `syncState` to reflect the current progress and handles retries, caching, and errors.
 
     func sync() async -> SyncState {
+        guard cloudKitAccountStatus == .available else {
+            return .stopped(
+                queueCount: queue.count,
+                error: NSError(domain: "CloudKit account cannot sync", code: 403)
+            )
+        }
         /// Batch sync in order of what is returned in `MYSyncDelegate.syncableRecordTypesInDependencyOrder()`
         guard let orderedRecordTypes = delegate?.syncableRecordTypesInDependencyOrder(),
               !orderedRecordTypes.isEmpty else {
@@ -224,6 +230,7 @@ extension MYSyncEngine {
                         )
                     }
                 } catch {
+                    self.interceptError(error)
                     self.logger.log(
                         "🛑 Failed to modifyReccords for '\(syncingRecordType)'\nSave: \(recordsToSave.count)\nDelete: \(recordsToDelete)",
                     )
@@ -296,6 +303,7 @@ extension MYSyncEngine {
                     }
                     
                 } catch {
+                    self.interceptError(error)
                     self.logger.log(
                         "🛑 Failed to delete \(zonesToDelete) record zones for '\(syncingRecordType)'",
                     )
@@ -316,6 +324,7 @@ extension MYSyncEngine {
                     )
                     transactionsCompleted.append(transaction)
                 } catch {
+                    self.interceptError(error)
                     transactionsFailed.updateValue(error, forKey: transaction)
                 }
             }
