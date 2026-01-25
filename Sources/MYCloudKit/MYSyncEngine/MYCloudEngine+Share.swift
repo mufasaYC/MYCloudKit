@@ -105,6 +105,7 @@ extension MYSyncEngine {
                 level: .error,
                 error: error
             )
+            self.interceptError(error)
             throw error
         }
 

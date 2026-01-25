@@ -46,6 +46,7 @@ extension MYSyncEngine {
                         } catch {
                             // If there is an error in saving the asset data, log the error
                             logger.log("📁 Error in saving the asset data", error: error)
+                            interceptError(error)
                         }
                     }
                 case .fileURL(let url):

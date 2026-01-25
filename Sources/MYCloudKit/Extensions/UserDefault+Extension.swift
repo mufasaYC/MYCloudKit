@@ -12,6 +12,7 @@ fileprivate struct UserDefaultKey {
     static let sharedPreviousServerChangeToken = "\(prefix)_sharedPreviousServerChangeToken"
     static let didSavePrivateSubscription = "\(prefix)_didSavePrivateSubscription"
     static let didSaveSharedSubscription = "\(prefix)_didSaveSharedSubscription"
+    static let iCloudIsConnected = "\(prefix)_iCloudLoggedIn"
 }
 
 extension UserDefaults {
@@ -128,5 +129,17 @@ extension UserDefaults {
             default:
                 assertionFailure("Unsupported database scope")
         }
+    }
+}
+
+extension UserDefaults {
+    var iCloudIsConnected: Bool {
+        get {
+            value(forKey: UserDefaultKey.iCloudIsConnected) as? Bool ?? true
+        }
+        set {
+            set(newValue, forKey: UserDefaultKey.iCloudIsConnected)
+        }
+        
     }
 }

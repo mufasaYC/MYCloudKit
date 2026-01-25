@@ -15,6 +15,9 @@ extension MYSyncEngine {
     ///
     /// - Note: This method is marked with `@MainActor` to ensure that `fetchState` updates happen on the main thread.
     public func fetch() async -> FetchState {
+        guard cloudKitAccountStatus == .available else {
+            return .stopped(error: NSError(domain: "CloudKit account cannot sync", code: 403))
+        }
         guard delegate != nil else {
             assertionFailure("MYSyncDelegate must be set before fetching data, otherwise you won't be able to save the fetched data.")
             return .idle
@@ -35,6 +38,7 @@ extension MYSyncEngine {
                 "🛑 Fetch operation failed",
                 error: error
             )
+            self.interceptError(error)
             return .stopped(error: error)
         }
     }
