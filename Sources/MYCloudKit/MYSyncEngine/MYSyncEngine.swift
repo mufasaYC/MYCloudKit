@@ -122,11 +122,7 @@ public final class MYSyncEngine: ObservableObject {
     }
     
     /// Optional delegate to receive sync lifecycle callbacks.
-    public weak var delegate: MYSyncDelegate? {
-        didSet {
-            self.willEnterForegroundNotification()
-        }
-    }
+    public weak var delegate: MYSyncDelegate?
     
     /// Initializes a new `MYCloudEngine` instance.
     ///
