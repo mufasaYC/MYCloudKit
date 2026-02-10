@@ -111,6 +111,8 @@ public final class MYSyncEngine: ObservableObject {
     @Published public var fetchState: FetchState = .idle
     
     @Published public var cloudKitAccountStatus: CKAccountStatus = .available
+    
+    private var didAddForegroundNotificationObserver: Bool = false
 
     /// Queue of pending transactions to be synced.
     var queue: [Transaction] {
@@ -179,7 +181,13 @@ public final class MYSyncEngine: ObservableObject {
         // Subscribe to private and shared CloudKit database changes for real-time sync triggers.
         self.subscribeToChanges(in: .private)
         self.subscribeToChanges(in: .shared)
-        
+    }
+    
+    private func addForegroundNotificationObserver() {
+        guard !didAddForegroundNotificationObserver else {
+            return
+        }
+        didAddForegroundNotificationObserver = true
         #if canImport(UIKit) && !os(watchOS)
         NotificationCenter.default.addObserver(
             self,
@@ -203,6 +211,7 @@ public final class MYSyncEngine: ObservableObject {
     
     @MainActor
     public func beginSync() {
+        addForegroundNotificationObserver()
         guard !syncState.isActive, !queue.isEmpty else {
             return
         }
@@ -215,6 +224,7 @@ public final class MYSyncEngine: ObservableObject {
     
     @MainActor
     public func beginFetch() async {
+        addForegroundNotificationObserver()
         guard !fetchState.isActive else {
             return
         }
