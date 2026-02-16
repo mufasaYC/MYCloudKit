@@ -196,7 +196,10 @@ public final class MYSyncEngine: ObservableObject {
     
     @objc
     private func willEnterForegroundNotification() {
-        Task {
+        Task { [weak self] in
+            guard let self else {
+                return
+            }
             if cloudKitAccountStatus != .available {
                 self.cloudKitAccountStatus =  try await ckContainer.accountStatus()
             }
@@ -212,9 +215,11 @@ public final class MYSyncEngine: ObservableObject {
             return
         }
         self.syncState = .syncing(queueCount: queue.count)
-        Task { @MainActor in
-            self.syncState = await sync()
-            self.beginSync()
+        Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+            self.syncState = await self.sync()
         }
     }
     
