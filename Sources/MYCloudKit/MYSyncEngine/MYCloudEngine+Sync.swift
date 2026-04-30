@@ -30,11 +30,7 @@ extension MYSyncEngine {
             assertionFailure("MYSyncDelegate must be set before syncing data, and `syncableRecordTypesInDependencyOrder` must not return an empty array")
             return .idle
         }
-        
-        var syncingRecordType: String = ""
-        var batchedPrivateTransactions: [[Transaction]] = []
-        var batchedSharedTransactions: [[Transaction]] = []
-        
+                
         for recordType in orderedRecordTypes {
             var privateTransactions: [Transaction] = []
             var sharedTransactions: [Transaction] = []
@@ -55,291 +51,305 @@ extension MYSyncEngine {
             if privateTransactions.isEmpty && sharedTransactions.isEmpty {
                 /// good, continue to the next record type sync all that depend on it are synced
             } else {
-                syncingRecordType = recordType
-                batchedPrivateTransactions.append(contentsOf: privateTransactions.chunked(into: 200))
-                batchedSharedTransactions.append(contentsOf: sharedTransactions.chunked(into: 200))
-                /// break so that all these record types can be synced and their errors handled before syncing any records that might depend on it
-                break
-            }
-        }
-        let batchedTransactions = batchedPrivateTransactions + batchedSharedTransactions
-        var transactionsCompleted: [Transaction] = []
-        var transactionsFailed: [Transaction: Error] = [:]
-        for transactions in batchedTransactions {
-            guard let databaseScope = transactions.first?.databaseScope(using: cache) else {
-                continue
-            }
-            let database = ckContainer.database(with: databaseScope)
-            var recordIDTransactionMap: [CKRecord.ID: Transaction] = [:]
-            var zoneIDTransactionMap: [CKRecordZone.ID: Transaction] = [:]
-            var recordsToSave: [CKRecord] = []
-            var recordsToDelete: [CKRecord.ID] = []
-            var zonesToDelete: [CKRecordZone.ID] = []
-            var recordsToCascadeDelete: [CKRecord.ID] = []
-            
-            for transaction in transactions {
-                /// Convert the transaction to a `CKRecord`. If conversion fails, remove from queue and retry.
-                guard let ckRecord = transaction.asCKRecord(using: self.cache) else {
-                    self.handleError(NSError(domain: "Cannot parse CKRecord", code: 500), for: transaction)
-                    continue
-                }
-                switch transaction.operationType {
-                    case .createOrUpdate:
-                        if recordIDTransactionMap[ckRecord.recordID] == nil {
-                            recordsToSave.append(ckRecord)
-                            recordIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID)
-                        }
-                    case .deleteZone:
-                        if zoneIDTransactionMap[ckRecord.recordID.zoneID] == nil {
-                            zonesToDelete.append(ckRecord.recordID.zoneID)
-                            zoneIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID.zoneID)
-                        }
-                    case .deleteRecord:
-                        if recordIDTransactionMap[ckRecord.recordID] == nil {
-                            recordsToDelete.append(ckRecord.recordID)
-                            recordIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID)
-                        }
-                    case .deleteChildRecords:
-                        recordsToCascadeDelete.append(ckRecord.recordID)
-                        recordIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID)
-                }
-            }
-            
-            self.logger.log(
-                "🌀 Syncing \(recordsToSave.count) '\(syncingRecordType)'\n🗑️ Deleting \(recordsToDelete.count) '\(syncingRecordType)'",
-                level: .debug
-            )
-            var missingZoneIDs: [CKRecordZone.ID] = []
-            
-            
-            // MARK: Save & Delete Records
-            if !recordsToSave.isEmpty || !recordsToDelete.isEmpty {
-                /// making sure if there is a save and delete in the same request, respect the delete and mark the save as completed
-                recordsToSave.forEach { record in
-                    if let index = recordsToDelete.firstIndex(of: record.recordID) {
-                        recordsToSave.remove(at: index)
-                        if let transaction = recordIDTransactionMap[record.recordID] {
-                            transactionsCompleted.append(transaction)
-                        } else {
-                            assertionFailure("How?")
-                        }
+                var batchedTransactions: [[Transaction]] = []
+                batchedTransactions.append(contentsOf: privateTransactions.chunked(into: 200))
+                batchedTransactions.append(contentsOf: sharedTransactions.chunked(into: 200))
+                for transactions in batchedTransactions {
+                    do {
+                        try await syncTransactions(transactions, recordType: recordType)
+                    } catch {
+                        return .stopped(queueCount: self.queue.count, error: error)
                     }
                 }
-                do {
-                    let modifyRecordsResult = try await database.modifyRecords(
-                        saving: recordsToSave,
-                        deleting: recordsToDelete,
-                        savePolicy: .allKeys,
-                        atomically: false
-                    )
-                    
-                    var successSavesCount: Int = .zero
-                    var failureSavesCount: Int = .zero
-                    
-                    var successDeleteCount: Int = .zero
-                    var failureDeleteCount: Int = .zero
-                    
-                    for result in modifyRecordsResult.saveResults {
-                        let recordID = result.key
-                        guard let transaction = recordIDTransactionMap[recordID] else {
-                            assertionFailure("How?")
-                            continue
-                        }
-                        switch result.value {
-                            case .success(let record):
-                                self.cache.saveEncodedSystemFields(
-                                    data: record.encodedSystemFields,
-                                    for: record.recordID.recordName
-                                )
-                                successSavesCount += 1
-                                transactionsCompleted.append(transaction)
-                            case .failure(let error):
-                                if let error = error as? CKError {
-                                    switch error.code {
-                                        case .zoneNotFound, .userDeletedZone:
-                                            /// Zone missing – likely first time syncing. Create it and retry.
-                                            self.logger.log(
-                                                "📦 Zone '\(recordID.zoneID.zoneName)' not found — attempting to create it",
-                                                level: .warning
-                                            )
-                                            if !missingZoneIDs.contains(recordID.zoneID) {
-                                                missingZoneIDs.append(recordID.zoneID)
-                                            }
-                                        default:
-                                            transactionsFailed.updateValue(error, forKey: transaction)
-                                            failureSavesCount += 1
-                                    }
-                                } else {
-                                    transactionsFailed.updateValue(error, forKey: transaction)
-                                    failureSavesCount += 1
-                                }
-                        }
-                    }
-                    
-                    if successSavesCount > 0 {
-                        self.logger.log(
-                            "✅ Successfully synced \(successSavesCount) '\(recordsToSave.first?.recordType ?? "Unknown")'",
-                            level: .debug
-                        )
-                    }
-                    
-                    if failureDeleteCount > 0 {
-                        self.logger.log(
-                            "🛑 Failed to sync \(failureDeleteCount) '\(recordsToSave.first?.recordType ?? "Unknown")'",
-                        )
-                    }
-                    
-                    for result in modifyRecordsResult.deleteResults {
-                        let recordID = result.key
-                        guard let transaction = recordIDTransactionMap[recordID] else {
-                            assertionFailure("How?")
-                            continue
-                        }
-                        switch result.value {
-                            case .success:
-                                transactionsCompleted.append(transaction)
-                                successDeleteCount += 1
-                            case .failure(let error):
-                                if let error = error as? CKError {
-                                    switch error.code {
-                                        case .userDeletedZone, .permissionFailure, .zoneNotFound:
-                                            /// false positives
-                                            self.cache.removeCache(for: transaction)
-                                            successDeleteCount += 1
-                                        default:
-                                            transactionsFailed.updateValue(error, forKey: transaction)
-                                            failureDeleteCount += 1
-                                    }
-                                } else {
-                                    transactionsFailed.updateValue(error, forKey: transaction)
-                                    failureSavesCount += 1
-                                }
-                        }
-                    }
-                    
-                    if successDeleteCount > 0 {
-                        self.logger.log(
-                            "✅ Successfully deleted \(successDeleteCount) '\(syncingRecordType)'",
-                            level: .debug
-                        )
-                    }
-                    
-                    if failureDeleteCount > 0 {
-                        self.logger.log(
-                            "🛑 Failed to delete \(failureDeleteCount) '\(syncingRecordType)'",
-                        )
-                    }
-                } catch {
-                    self.interceptError(error)
-                    self.logger.log(
-                        "🛑 Failed to modifyReccords for '\(syncingRecordType)'\nSave: \(recordsToSave.count)\nDelete: \(recordsToDelete)",
-                    )
-                    
-                    transactions.forEach {
-                        transactionsFailed.updateValue(error, forKey: $0)
-                    }
-                }
-            }
-            
-            // MARK: Save & Delete Zones
-            if !missingZoneIDs.isEmpty || !zonesToDelete.isEmpty {
-                /// making sure if there is a save and delete in the same request, respect the delete and mark the save as completed
-                missingZoneIDs.forEach { zoneID in
-                    if let index = zonesToDelete.firstIndex(of: zoneID) {
-                        missingZoneIDs.remove(at: index)
-                    }
-                }
-                do {
-                    let modifyRecordZonesResult = try await database.modifyRecordZones(
-                        saving: missingZoneIDs.map { .init(zoneID: $0) },
-                        deleting: zonesToDelete
-                    )
-                    for result in modifyRecordZonesResult.saveResults {
-                        let zoneID = result.key
-                        switch result.value {
-                            case .success:
-                                self.logger.log(
-                                    "✅ Created zone '\(zoneID.zoneName)'",
-                                    level: .debug
-                                )
-                            case .failure(let error):
-                                self.logger.log(
-                                    "🛑 Failed to create zone '\(zoneID.zoneName)'",
-                                    error: error
-                                )
-                        }
-                    }
-                    
-                    var successZoneDeleteCount: Int = .zero
-                    var failureZoneDeleteCount: Int = .zero
-                    for result in modifyRecordZonesResult.deleteResults {
-                        let zoneID = result.key
-                        guard let transaction = zoneIDTransactionMap[zoneID] else {
-                            assertionFailure("How?")
-                            continue
-                        }
-                        
-                        switch result.value {
-                            case .success:
-                                transactionsCompleted.append(transaction)
-                                successZoneDeleteCount += 1
-                            case .failure(let error):
-                                transactionsFailed.updateValue(error, forKey: transaction)
-                                failureZoneDeleteCount += 1
-                        }
-                    }
-                    
-                    if successZoneDeleteCount > 0 {
-                        self.logger.log(
-                            "✅ Successfully deleted \(successZoneDeleteCount) zones (\(syncingRecordType))",
-                            level: .debug
-                        )
-                    }
-                    
-                    if failureZoneDeleteCount > 0 {
-                        self.logger.log(
-                            "🛑 Failed to delete \(failureZoneDeleteCount) zones (\(syncingRecordType))",
-                        )
-                    }
-                    
-                } catch {
-                    self.interceptError(error)
-                    self.logger.log(
-                        "🛑 Failed to delete \(zonesToDelete) record zones for '\(syncingRecordType)'",
-                    )
-                    transactions.forEach { transactionsFailed.updateValue(error, forKey: $0) }
-                }
-            }
-            
-            // MARK: Cascade Delete Records
-            for recordID in recordsToCascadeDelete {
-                guard let transaction = recordIDTransactionMap[recordID] else {
-                    assertionFailure("How?")
-                    continue
-                }
-                do {
-                    try await cascadeDeleteChildRecords(
-                        for: recordID,
-                        in: database.databaseScope
-                    )
-                    transactionsCompleted.append(transaction)
-                } catch {
-                    self.interceptError(error)
-                    transactionsFailed.updateValue(error, forKey: transaction)
-                }
-            }
-            
-            let completedTransactionIDs = transactionsCompleted.map { $0.id }
-            transactionsFailed.forEach { transaction, error in
-                self.handleError(error, for: transaction)
-            }
-            self.queue = queue.filter { !completedTransactionIDs.contains($0.id) }
-            if !transactionsFailed.isEmpty {
-                return .stopped(queueCount: queue.count, error: transactionsFailed.first?.value)
             }
         }
         
         return .completed(date: .now)
+    }
+    
+    private func syncTransactions(_ transactions: [Transaction], recordType: String) async throws {
+        guard let databaseScope = transactions.first?.databaseScope(using: cache) else {
+            return
+        }
+        var transactionsCompleted: [Transaction] = []
+        var transactionsFailed: [Transaction: Error] = [:]
+        
+        let database = ckContainer.database(with: databaseScope)
+        var recordIDTransactionMap: [CKRecord.ID: Transaction] = [:]
+        var zoneIDTransactionMap: [CKRecordZone.ID: Transaction] = [:]
+        var recordsToSave: [CKRecord] = []
+        var recordsToDelete: [CKRecord.ID] = []
+        var zonesToDelete: [CKRecordZone.ID] = []
+        var recordsToCascadeDelete: [CKRecord.ID] = []
+        var missingZoneTransactionsToBeRetried: [Transaction] = []
+        
+        for transaction in transactions {
+            /// Convert the transaction to a `CKRecord`. If conversion fails, remove from queue and retry.
+            guard let ckRecord = transaction.asCKRecord(using: self.cache) else {
+                self.handleError(NSError(domain: "Cannot parse CKRecord", code: 500), for: transaction)
+                continue
+            }
+            switch transaction.operationType {
+                case .createOrUpdate:
+                    if recordIDTransactionMap[ckRecord.recordID] == nil {
+                        recordsToSave.append(ckRecord)
+                        recordIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID)
+                    }
+                case .deleteZone:
+                    if zoneIDTransactionMap[ckRecord.recordID.zoneID] == nil {
+                        zonesToDelete.append(ckRecord.recordID.zoneID)
+                        zoneIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID.zoneID)
+                    }
+                case .deleteRecord:
+                    if recordIDTransactionMap[ckRecord.recordID] == nil {
+                        recordsToDelete.append(ckRecord.recordID)
+                        recordIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID)
+                    }
+                case .deleteChildRecords:
+                    recordsToCascadeDelete.append(ckRecord.recordID)
+                    recordIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID)
+            }
+        }
+        
+        self.logger.log(
+            "🌀 Syncing \(recordsToSave.count) '\(recordType)'\n🗑️ Deleting \(recordsToDelete.count) '\(recordType)'",
+            level: .debug
+        )
+        var missingZoneIDs: [CKRecordZone.ID] = []
+        
+        
+        // MARK: Save & Delete Records
+        if !recordsToSave.isEmpty || !recordsToDelete.isEmpty {
+            /// making sure if there is a save and delete in the same request, respect the delete and mark the save as completed
+            recordsToSave.forEach { record in
+                if let index = recordsToDelete.firstIndex(of: record.recordID) {
+                    recordsToSave.remove(at: index)
+                    if let transaction = recordIDTransactionMap[record.recordID] {
+                        transactionsCompleted.append(transaction)
+                    } else {
+                        assertionFailure("How?")
+                    }
+                }
+            }
+            do {
+                let modifyRecordsResult = try await database.modifyRecords(
+                    saving: recordsToSave,
+                    deleting: recordsToDelete,
+                    savePolicy: .allKeys,
+                    atomically: false
+                )
+                
+                var successSavesCount: Int = .zero
+                var failureSavesCount: Int = .zero
+                
+                var successDeleteCount: Int = .zero
+                var failureDeleteCount: Int = .zero
+                
+                for result in modifyRecordsResult.saveResults {
+                    let recordID = result.key
+                    guard let transaction = recordIDTransactionMap[recordID] else {
+                        assertionFailure("How?")
+                        continue
+                    }
+                    switch result.value {
+                        case .success(let record):
+                            self.cache.saveEncodedSystemFields(
+                                data: record.encodedSystemFields,
+                                for: record.recordID.recordName
+                            )
+                            successSavesCount += 1
+                            transactionsCompleted.append(transaction)
+                        case .failure(let error):
+                            if let error = error as? CKError {
+                                switch error.code {
+                                    case .zoneNotFound, .userDeletedZone:
+                                        /// Zone missing – likely first time syncing. Create it and retry.
+                                        self.logger.log(
+                                            "📦 Zone '\(recordID.zoneID.zoneName)' not found — attempting to create it",
+                                            level: .warning
+                                        )
+                                        if !missingZoneIDs.contains(recordID.zoneID) {
+                                            missingZoneIDs.append(recordID.zoneID)
+                                        }
+                                        
+                                        missingZoneTransactionsToBeRetried.append(transaction)
+                                    default:
+                                        transactionsFailed.updateValue(error, forKey: transaction)
+                                        failureSavesCount += 1
+                                }
+                            } else {
+                                transactionsFailed.updateValue(error, forKey: transaction)
+                                failureSavesCount += 1
+                            }
+                    }
+                }
+                
+                if successSavesCount > 0 {
+                    self.logger.log(
+                        "✅ Successfully synced \(successSavesCount) '\(recordsToSave.first?.recordType ?? "Unknown")'",
+                        level: .debug
+                    )
+                }
+                
+                if failureDeleteCount > 0 {
+                    self.logger.log(
+                        "🛑 Failed to sync \(failureDeleteCount) '\(recordsToSave.first?.recordType ?? "Unknown")'",
+                    )
+                }
+                
+                for result in modifyRecordsResult.deleteResults {
+                    let recordID = result.key
+                    guard let transaction = recordIDTransactionMap[recordID] else {
+                        assertionFailure("How?")
+                        continue
+                    }
+                    switch result.value {
+                        case .success:
+                            transactionsCompleted.append(transaction)
+                            successDeleteCount += 1
+                        case .failure(let error):
+                            if let error = error as? CKError {
+                                switch error.code {
+                                    case .userDeletedZone, .permissionFailure, .zoneNotFound:
+                                        /// false positives
+                                        self.cache.removeCache(for: transaction)
+                                        successDeleteCount += 1
+                                    default:
+                                        transactionsFailed.updateValue(error, forKey: transaction)
+                                        failureDeleteCount += 1
+                                }
+                            } else {
+                                transactionsFailed.updateValue(error, forKey: transaction)
+                                failureSavesCount += 1
+                            }
+                    }
+                }
+                
+                if successDeleteCount > 0 {
+                    self.logger.log(
+                        "✅ Successfully deleted \(successDeleteCount) '\(recordType)'",
+                        level: .debug
+                    )
+                }
+                
+                if failureDeleteCount > 0 {
+                    self.logger.log(
+                        "🛑 Failed to delete \(failureDeleteCount) '\(recordType)'",
+                    )
+                }
+            } catch {
+                self.interceptError(error)
+                self.logger.log(
+                    "🛑 Failed to modifyReccords for '\(recordType)'\nSave: \(recordsToSave.count)\nDelete: \(recordsToDelete)",
+                )
+                
+                transactions.forEach {
+                    transactionsFailed.updateValue(error, forKey: $0)
+                }
+            }
+        }
+        
+        // MARK: Save & Delete Zones
+        if !missingZoneIDs.isEmpty || !zonesToDelete.isEmpty {
+            /// making sure if there is a save and delete in the same request, respect the delete and mark the save as completed
+            missingZoneIDs.forEach { zoneID in
+                if let index = zonesToDelete.firstIndex(of: zoneID) {
+                    missingZoneIDs.remove(at: index)
+                }
+            }
+            do {
+                let modifyRecordZonesResult = try await database.modifyRecordZones(
+                    saving: missingZoneIDs.map { .init(zoneID: $0) },
+                    deleting: zonesToDelete
+                )
+                for result in modifyRecordZonesResult.saveResults {
+                    let zoneID = result.key
+                    switch result.value {
+                        case .success:
+                            self.logger.log(
+                                "✅ Created zone '\(zoneID.zoneName)'",
+                                level: .debug
+                            )
+                        case .failure(let error):
+                            self.logger.log(
+                                "🛑 Failed to create zone '\(zoneID.zoneName)'",
+                                error: error
+                            )
+                    }
+                }
+                
+                var successZoneDeleteCount: Int = .zero
+                var failureZoneDeleteCount: Int = .zero
+                for result in modifyRecordZonesResult.deleteResults {
+                    let zoneID = result.key
+                    guard let transaction = zoneIDTransactionMap[zoneID] else {
+                        assertionFailure("How?")
+                        continue
+                    }
+                    
+                    switch result.value {
+                        case .success:
+                            transactionsCompleted.append(transaction)
+                            successZoneDeleteCount += 1
+                        case .failure(let error):
+                            transactionsFailed.updateValue(error, forKey: transaction)
+                            failureZoneDeleteCount += 1
+                    }
+                }
+                
+                if successZoneDeleteCount > 0 {
+                    self.logger.log(
+                        "✅ Successfully deleted \(successZoneDeleteCount) zones (\(recordType))",
+                        level: .debug
+                    )
+                }
+                
+                if failureZoneDeleteCount > 0 {
+                    self.logger.log(
+                        "🛑 Failed to delete \(failureZoneDeleteCount) zones (\(recordType))",
+                    )
+                }
+                
+            } catch {
+                self.interceptError(error)
+                self.logger.log(
+                    "🛑 Failed to delete \(zonesToDelete) record zones for '\(recordType)'",
+                )
+                transactions.forEach { transactionsFailed.updateValue(error, forKey: $0) }
+            }
+        }
+        
+        // MARK: Cascade Delete Records
+        for recordID in recordsToCascadeDelete {
+            guard let transaction = recordIDTransactionMap[recordID] else {
+                assertionFailure("How?")
+                continue
+            }
+            do {
+                try await cascadeDeleteChildRecords(
+                    for: recordID,
+                    in: database.databaseScope
+                )
+                transactionsCompleted.append(transaction)
+            } catch {
+                self.interceptError(error)
+                transactionsFailed.updateValue(error, forKey: transaction)
+            }
+        }
+        
+        let completedTransactionIDs = transactionsCompleted.map { $0.id }
+        transactionsFailed.forEach { transaction, error in
+            self.handleError(error, for: transaction)
+        }
+        self.queue = queue.filter { !completedTransactionIDs.contains($0.id) }
+        
+        if !transactionsFailed.isEmpty {
+            throw transactionsFailed.first?.value ?? NSError(domain: "Something went wrong", code: 500)
+        }
+        
+        if !missingZoneTransactionsToBeRetried.isEmpty {
+            try await self.syncTransactions(missingZoneTransactionsToBeRetried, recordType: recordType)
+        }
     }
 }
 
@@ -441,7 +451,7 @@ extension MYSyncEngine {
                     errorKind = .dontSyncThis
                     
                     // Shouldn’t occur in transaction-based sync
-                case .alreadyShared, .participantMayNeedVerification, .tooManyParticipants:
+                case .alreadyShared, .participantMayNeedVerification, .tooManyParticipants, .participantAlreadyInvited:
                     reason = "Share failure — should not apply to transactions."
                     errorKind = .dontSyncThis
                     
