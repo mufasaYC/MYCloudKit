@@ -413,7 +413,20 @@ extension MYSyncEngine {
         /// let file: URL? = record.value(for: "file")
         /// let childReference: String? = record.value(for: "child_record_id")
         /// ```
+        public func value<T: Codable>(for key: String) -> T? {
+            if let data = ckRecord[key] as? Data,
+               let value = try? JSONDecoder().decode(T.self, from: data) {
+                return value
+            }
+            
+            return rawValue(for: key)
+        }
+        
         public func value<T>(for key: String) -> T? {
+            rawValue(for: key)
+        }
+        
+        private func rawValue<T>(for key: String) -> T? {
             if let asset = ckRecord[key] as? CKAsset {
                 if let fileURL = asset.fileURL {
                     if let expectedReturn = asset.fileURL as? T {

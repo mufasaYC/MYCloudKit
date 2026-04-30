@@ -53,6 +53,7 @@ extension MYSyncEngine {
             case date(Date?)
             case asset(URL?) // Represents a file-based asset (image, video, etc.)
             case string(String?)
+            case codable(Data?)
             
             /// Represents a reference to another record, with an associated delete rule.
             case reference(Record?, deleteRule: MYRecordValue.DeleteRule)
@@ -249,6 +250,8 @@ extension MYSyncEngine.Transaction {
                     }
                 case .string(let string):
                     ckRecord[key] = string
+                case .codable(let data):
+                    ckRecord[key] = data
                 case .reference(let referencedRecord, let deleteRule):
                     if let referencedRecord {
                         let recordID = referencedRecord.baseCKRecord(using: cache).recordID
@@ -283,6 +286,8 @@ extension MYSyncEngine.Transaction {
                                 if let string {
                                     items.append(string)
                                 }
+                            case .codable:
+                                assertionFailure("Array of Codable values is not supported by CloudKit")
                             case .reference(let referencedRecord, let deleteRule):
                                 if let referencedRecord {
                                     let recordID = referencedRecord.baseCKRecord(using: cache).recordID

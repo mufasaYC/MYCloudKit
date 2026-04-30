@@ -45,7 +45,22 @@ extension CKRecord {
     /// let parentID: String? = record.value(for: "parentRef")  // Reference → recordName
     /// let score: Int? = record.value(for: "score")            // Int field
     /// ```
+    func value<T: Codable>(for key: String) -> T? {
+        let fieldValue = self[key]
+        
+        if let data = fieldValue as? Data,
+           let value = try? JSONDecoder().decode(T.self, from: data) {
+            return value
+        }
+
+        return rawValue(for: key)
+    }
+    
     func value<T>(for key: String) -> T? {
+        rawValue(for: key)
+    }
+    
+    private func rawValue<T>(for key: String) -> T? {
         let rawValue = self[key]
 
         // Special case: CKRecord.Reference → String (recordName)
