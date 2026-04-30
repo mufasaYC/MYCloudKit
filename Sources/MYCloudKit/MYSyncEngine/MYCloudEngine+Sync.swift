@@ -81,6 +81,7 @@ extension MYSyncEngine {
         var recordsToDelete: [CKRecord.ID] = []
         var zonesToDelete: [CKRecordZone.ID] = []
         var recordsToCascadeDelete: [CKRecord.ID] = []
+        var missingZoneTransactionsByZoneID: [CKRecordZone.ID: [Transaction]] = [:]
         var missingZoneTransactionsToBeRetried: [Transaction] = []
         
         for transaction in transactions {
@@ -91,7 +92,9 @@ extension MYSyncEngine {
             }
             switch transaction.operationType {
                 case .createOrUpdate:
-                    if recordIDTransactionMap[ckRecord.recordID] == nil {
+                    if recordsToDelete.contains(ckRecord.recordID) {
+                        transactionsCompleted.append(transaction)
+                    } else if recordIDTransactionMap[ckRecord.recordID] == nil {
                         recordsToSave.append(ckRecord)
                         recordIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID)
                     }
@@ -101,7 +104,16 @@ extension MYSyncEngine {
                         zoneIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID.zoneID)
                     }
                 case .deleteRecord:
-                    if recordIDTransactionMap[ckRecord.recordID] == nil {
+                    if let saveIndex = recordsToSave.firstIndex(where: { $0.recordID == ckRecord.recordID }) {
+                        recordsToSave.remove(at: saveIndex)
+                        if let transaction = recordIDTransactionMap[ckRecord.recordID] {
+                            transactionsCompleted.append(transaction)
+                        } else {
+                            assertionFailure("How?")
+                        }
+                    }
+                    
+                    if !recordsToDelete.contains(ckRecord.recordID) {
                         recordsToDelete.append(ckRecord.recordID)
                         recordIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID)
                     }
@@ -120,17 +132,6 @@ extension MYSyncEngine {
         
         // MARK: Save & Delete Records
         if !recordsToSave.isEmpty || !recordsToDelete.isEmpty {
-            /// making sure if there is a save and delete in the same request, respect the delete and mark the save as completed
-            recordsToSave.forEach { record in
-                if let index = recordsToDelete.firstIndex(of: record.recordID) {
-                    recordsToSave.remove(at: index)
-                    if let transaction = recordIDTransactionMap[record.recordID] {
-                        transactionsCompleted.append(transaction)
-                    } else {
-                        assertionFailure("How?")
-                    }
-                }
-            }
             do {
                 let modifyRecordsResult = try await database.modifyRecords(
                     saving: recordsToSave,
@@ -172,7 +173,7 @@ extension MYSyncEngine {
                                             missingZoneIDs.append(recordID.zoneID)
                                         }
                                         
-                                        missingZoneTransactionsToBeRetried.append(transaction)
+                                        missingZoneTransactionsByZoneID[recordID.zoneID, default: []].append(transaction)
                                     default:
                                         transactionsFailed.updateValue(error, forKey: transaction)
                                         failureSavesCount += 1
@@ -186,14 +187,14 @@ extension MYSyncEngine {
                 
                 if successSavesCount > 0 {
                     self.logger.log(
-                        "✅ Successfully synced \(successSavesCount) '\(recordsToSave.first?.recordType ?? "Unknown")'",
+                        "✅ Successfully synced \(successSavesCount) '\(recordType)'",
                         level: .debug
                     )
                 }
                 
-                if failureDeleteCount > 0 {
+                if failureSavesCount > 0 {
                     self.logger.log(
-                        "🛑 Failed to sync \(failureDeleteCount) '\(recordsToSave.first?.recordType ?? "Unknown")'",
+                        "🛑 Failed to sync \(failureSavesCount) '\(recordType)'",
                     )
                 }
                 
@@ -213,6 +214,7 @@ extension MYSyncEngine {
                                     case .userDeletedZone, .permissionFailure, .zoneNotFound:
                                         /// false positives
                                         self.cache.removeCache(for: transaction)
+                                        transactionsCompleted.append(transaction)
                                         successDeleteCount += 1
                                     default:
                                         transactionsFailed.updateValue(error, forKey: transaction)
@@ -220,7 +222,7 @@ extension MYSyncEngine {
                                 }
                             } else {
                                 transactionsFailed.updateValue(error, forKey: transaction)
-                                failureSavesCount += 1
+                                failureDeleteCount += 1
                             }
                     }
                 }
@@ -252,11 +254,9 @@ extension MYSyncEngine {
         // MARK: Save & Delete Zones
         if !missingZoneIDs.isEmpty || !zonesToDelete.isEmpty {
             /// making sure if there is a save and delete in the same request, respect the delete and mark the save as completed
-            missingZoneIDs.forEach { zoneID in
-                if let index = zonesToDelete.firstIndex(of: zoneID) {
-                    missingZoneIDs.remove(at: index)
-                }
-            }
+            let zonesToDeleteSet = Set(zonesToDelete)
+            missingZoneIDs.removeAll { zonesToDeleteSet.contains($0) }
+            
             do {
                 let modifyRecordZonesResult = try await database.modifyRecordZones(
                     saving: missingZoneIDs.map { .init(zoneID: $0) },
@@ -270,11 +270,17 @@ extension MYSyncEngine {
                                 "✅ Created zone '\(zoneID.zoneName)'",
                                 level: .debug
                             )
+                            missingZoneTransactionsToBeRetried.append(
+                                contentsOf: missingZoneTransactionsByZoneID[zoneID, default: []]
+                            )
                         case .failure(let error):
                             self.logger.log(
                                 "🛑 Failed to create zone '\(zoneID.zoneName)'",
                                 error: error
                             )
+                            for transaction in missingZoneTransactionsByZoneID[zoneID, default: []] {
+                                transactionsFailed.updateValue(error, forKey: transaction)
+                            }
                     }
                 }
                 
@@ -630,6 +636,17 @@ extension MYSyncEngine {
 
         // Collect all matched record IDs
         recordIDs.append(contentsOf: result.matchResults.map { $0.0 })
+        /*
+         /// better, do this in the future, think what can go wrong first
+         for (recordID, matchResult) in result.matchResults {
+             switch matchResult {
+                 case .success:
+                     recordIDs.append(recordID)
+                 case .failure(let error):
+                     throw error
+             }
+         }
+         */
 
         // If there's a cursor, recurse to fetch the next batch
         if let nextCursor = result.queryCursor {
