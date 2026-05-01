@@ -48,6 +48,8 @@ extension MYSyncEngine {
                             logger.log("📁 Error in saving the asset data", error: error)
                             interceptError(error)
                         }
+                    } else {
+                        properties.updateValue(.asset(nil), forKey: key)
                     }
                 case .codable(let codable):
                     if let codable {

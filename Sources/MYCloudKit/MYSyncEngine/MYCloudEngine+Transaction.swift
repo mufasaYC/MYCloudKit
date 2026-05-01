@@ -247,6 +247,8 @@ extension MYSyncEngine.Transaction {
                 case .asset(let assetURL):
                     if let assetURL {
                         ckRecord[key] = CKAsset(fileURL: assetURL)
+                    } else {
+                        ckRecord[key] = nil
                     }
                 case .string(let string):
                     ckRecord[key] = string

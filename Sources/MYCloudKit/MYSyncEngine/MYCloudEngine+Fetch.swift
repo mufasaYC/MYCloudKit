@@ -73,13 +73,23 @@ extension MYSyncEngine {
         let database = ckContainer.database(with: scope)
         
         // Step 1: Fetch database-level changes (zone creations/deletions)
-        repeat {
-            let response = try await database.databaseChanges(since: databaseChangeToken)
-            deletedZoneIDs = response.deletions.map { $0.zoneID }
-            newZoneIDs = response.modifications.map { $0.zoneID }
-            databaseChangeToken = response.changeToken
-            moreComing = response.moreComing
-        } while moreComing
+        do {
+            repeat {
+                let response = try await database.databaseChanges(since: databaseChangeToken)
+                deletedZoneIDs.append(contentsOf: response.deletions.map { $0.zoneID })
+                newZoneIDs.append(contentsOf: response.modifications.map { $0.zoneID })
+                databaseChangeToken = response.changeToken
+                moreComing = response.moreComing
+            } while moreComing
+        } catch {
+            if let ckError = error as? CKError,
+               ckError.code == .changeTokenExpired {
+                userDefaults.setPreviousServerChangeToken(for: scope, nil)
+                try await fetch(in: scope)
+            } else {
+                throw error
+            }
+        }
         
         // Step 2: Prepare the full list of zone IDs to fetch record changes from
         let existingZoneIDs: [CKRecordZone.ID] = cache.getZoneIDs()
@@ -108,6 +118,7 @@ extension MYSyncEngine {
         }
         
         var newZoneServerChangeToken: [CKRecordZone.ID: CKServerChangeToken] = [:]
+        var fetchErrors: [Error] = []
         
         // Step 4: Fetch record-level changes within the zones
         await withCheckedContinuation { continuation in
@@ -144,6 +155,7 @@ extension MYSyncEngine {
                             level: .warning,
                             error: error
                         )
+                        fetchErrors.append(error)
                 }
             }
             
@@ -158,6 +170,7 @@ extension MYSyncEngine {
                             level: .warning,
                             error: error
                         )
+                        fetchErrors.append(error)
                 }
             }
             
@@ -187,6 +200,10 @@ extension MYSyncEngine {
             }
             
             database.add(operation)
+        }
+        
+        if let error = fetchErrors.first {
+            throw error
         }
         
         // Step 5: Apply the changes to local storage
