@@ -48,6 +48,20 @@ extension MYSyncEngine {
                             logger.log("📁 Error in saving the asset data", error: error)
                             interceptError(error)
                         }
+                    } else {
+                        properties.updateValue(.asset(nil), forKey: key)
+                    }
+                case .codable(let codable):
+                    if let codable {
+                        do {
+                            let data = try JSONEncoder().encode(codable)
+                            properties.updateValue(.codable(data), forKey: key)
+                        } catch {
+                            logger.log("🛑 Error in encoding Codable value", error: error)
+                            interceptError(error)
+                        }
+                    } else {
+                        properties.updateValue(.codable(nil), forKey: key)
                     }
                 case .fileURL(let url):
                     properties.updateValue(.asset(url), forKey: key)
@@ -110,6 +124,9 @@ extension MYSyncEngine {
                                 if kind == nil { kind = "string" }
                                 assert(kind == "string", "array of different types is not supported")
                                 recordValues.append(.string(string))
+                            case .codable:
+                                assertionFailure("Array of Codable values is not supported by MYCloudKit yet, just make it an array yourself please")
+                                continue
                             case .reference(let reference, let deleteRule):
                                 if kind == nil { kind = "reference" }
                                 assert(kind == "reference", "array of different types is not supported")

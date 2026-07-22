@@ -18,6 +18,7 @@ public indirect enum MYRecordValue {
     case asset(Data?)
     case fileURL(URL?)
     case string(String?)
+    case codable(Codable?)
     
     /// Represents a reference to another record conforming to `MYRecordConvertible`, along with its deletion behavior.
     case reference((any MYRecordConvertible)?, deleteRule: DeleteRule)

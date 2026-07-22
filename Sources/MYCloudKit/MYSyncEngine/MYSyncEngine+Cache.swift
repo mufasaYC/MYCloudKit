@@ -92,11 +92,11 @@ extension MYSyncEngine.Cache {
             .appendingPathComponent(transaction.id.uuidString)
 
         if !fileManager.fileExists(atPath: transactionFolderURL.path) {
-            try? fileManager.createDirectory(at: transactionFolderURL, withIntermediateDirectories: true)
+            try fileManager.createDirectory(at: transactionFolderURL, withIntermediateDirectories: true)
         }
 
         let fileURL = transactionFolderURL.appendingPathComponent(key)
-        try? data.write(to: fileURL)
+        try data.write(to: fileURL)
 
         return fileURL
     }
