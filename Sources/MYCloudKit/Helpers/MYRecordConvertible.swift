@@ -105,6 +105,8 @@ public protocol MYRecordConvertible {
     ///
     /// Keys are field names; values must be an `MYRecordValue`.
     /// Includes support for primitive types, CloudKit references, and assets.
+    /// Do not use CloudKit metadata names such as `creationDate`; attempting
+    /// to sync a reserved key triggers an assertion with rename guidance.
     var myProperties: [String: MYRecordValue] { get }
 }
 

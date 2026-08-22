@@ -22,6 +22,10 @@ let package = Package(
     targets: [
         .target(
             name: "MYCloudKit"
+        ),
+        .testTarget(
+            name: "MYCloudKitTests",
+            dependencies: ["MYCloudKit"]
         )
     ]
 )

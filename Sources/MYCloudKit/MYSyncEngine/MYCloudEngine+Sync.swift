@@ -392,7 +392,7 @@ extension MYSyncEngine {
                     reason: reason,
                     error: error
                    ) {
-                    let transactions = recordsToSync.map { record in
+                    let transactions = recordsToSync.compactMap { record in
                         getCreateUpdateTransaction(for: record)
                     }
                     queue.insert(contentsOf: transactions, at: index)

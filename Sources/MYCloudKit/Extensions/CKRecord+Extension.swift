@@ -5,6 +5,35 @@
 import CloudKit
 
 extension CKRecord {
+    /// Property names CloudKit reserves for record metadata. Assigning a
+    /// custom value to any of these keys raises an Objective-C exception.
+    static let reservedCustomFieldKeys: Set<String> = [
+        "creationDate",
+        "creatorUserRecordID",
+        "lastModifiedUserRecordID",
+        "modificationDate",
+        "recordChangeTag",
+        "recordID",
+        "recordType"
+    ]
+
+    static func reservedCustomFieldKeys<S: Sequence>(in keys: S) -> [String] where S.Element == String {
+        keys.filter(reservedCustomFieldKeys.contains).sorted()
+    }
+
+    static func reservedCustomFieldKeyMessage(
+        keys: [String],
+        recordType: String
+    ) -> String {
+        let keyList = keys.map { "'\($0)'" }.joined(separator: ", ")
+        return "MYCloudKit cannot sync '\(recordType)' because myProperties contains "
+            + "CloudKit-reserved key(s): \(keyList). Rename these keys in your "
+            + "MYRecordConvertible implementation (for example, use 'createdAt' "
+            + "instead of 'creationDate')."
+    }
+}
+
+extension CKRecord {
     
     /// Initializes a `CKRecord` from previously encoded system fields data.
     /// - Parameter data: A `Data` object representing the encoded system fields of a `CKRecord`.

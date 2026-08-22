@@ -218,6 +218,16 @@ extension MYSyncEngine.Transaction {
     ///   - The above is ensured and cleaned up on a successful sync.
     ///   - All field keys must match those expected by the corresponding CloudKit record type.
     func asCKRecord(using cache: Cache) -> CKRecord? {
+        let invalidKeys = CKRecord.reservedCustomFieldKeys(in: properties.keys)
+        guard invalidKeys.isEmpty else {
+            let message = CKRecord.reservedCustomFieldKeyMessage(
+                keys: invalidKeys,
+                recordType: record.recordType
+            )
+            assertionFailure(message)
+            return nil
+        }
+
         let ckRecord = record.baseCKRecord(for: referencingRecordNames, using: cache)
         
         if let parentRecordName = record.parentRecordName {

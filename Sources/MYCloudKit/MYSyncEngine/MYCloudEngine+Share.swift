@@ -34,7 +34,15 @@ extension MYSyncEngine {
         for record: any MYRecordConvertible
     ) async throws -> (share: CKShare, container: CKContainer) {
         
-        let transaction = getCreateUpdateTransaction(for: record)
+        guard let transaction = getCreateUpdateTransaction(for: record) else {
+            throw NSError(
+                domain: "MYSync",
+                code: 400,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "The record contains a CloudKit-reserved property key."
+                ]
+            )
+        }
 
         guard let ckRecord = transaction.asCKRecord(using: cache) else {
             throw NSError(
