@@ -21,7 +21,8 @@ extension MYSyncEngine {
     ///   CloudKit uses this structure to determine what records to include in the shared scope.
     ///
     /// The function also checks if an existing share already exists for the record and reuses it if possible.
-    /// Both the main record and its share are saved in a single transaction to ensure consistency.
+    /// When creating a share, the main record and its share are saved in a single transaction. When reusing a
+    /// share, only the share is saved because the server root record already belongs to it.
     ///
     /// - Parameters:
     ///   - title: A displayable title for the share (visible in share sheet).
@@ -54,25 +55,32 @@ extension MYSyncEngine {
 
         let databaseScope = transaction.databaseScope(using: cache)
         let database = ckContainer.database(with: databaseScope)
+        let isZoneWideShare = record.myRecordID == record.myRootGroupID
         var shareRecord: CKShare
+        let recordsToSave: [CKRecord]
 
-        // Reuse existing share if one already exists
-        if let existingShareID = await database.getShareRecordId(ckRecord: ckRecord),
-           let existingShare = try? await database.record(for: existingShareID) as? CKShare {
+        // A locally reconstructed record doesn't necessarily contain CloudKit's server-managed
+        // `share` reference. Resolve it from the server before deciding to create a new share.
+        if let existingShare = try await database.existingShare(
+            for: ckRecord,
+            isZoneWide: isZoneWideShare
+        ) {
             shareRecord = existingShare
-        } else if ckRecord.recordID.recordName == ckRecord.recordID.zoneID.zoneName {
-            // This handles the case of a CKRecordZone sharing
+            recordsToSave = [existingShare]
+        } else if isZoneWideShare {
             shareRecord = CKShare(recordZoneID: ckRecord.recordID.zoneID)
+            recordsToSave = [ckRecord, shareRecord]
         } else {
             shareRecord = CKShare(rootRecord: ckRecord)
+            recordsToSave = [ckRecord, shareRecord]
         }
 
         // Assign a visible title for the share
         shareRecord[CKShare.SystemFieldKey.title] = title
 
-        // Save both the record and its share in a single transaction
+        // A new share must be saved with its root record; an existing share can be updated alone.
         let result = try await database.modifyRecords(
-            saving: [ckRecord, shareRecord],
+            saving: recordsToSave,
             deleting: [],
             savePolicy: .allKeys
         )
@@ -123,10 +131,35 @@ extension MYSyncEngine {
 }
 
 private extension CKDatabase {
-    func getShareRecordId(ckRecord: CKRecord) async -> CKRecord.ID? {
-        if let existingShareID = ckRecord.share?.recordID {
-            return existingShareID
+    func existingShare(for record: CKRecord, isZoneWide: Bool) async throws -> CKShare? {
+        if let shareID = record.share?.recordID {
+            return try await recordIfExists(for: shareID) as? CKShare
         }
-        return try? await record(for: .init(recordName: CKRecordNameZoneWideShare, zoneID: ckRecord.recordID.zoneID)).recordID
+
+        if isZoneWide {
+            let shareID = CKRecord.ID(
+                recordName: CKRecordNameZoneWideShare,
+                zoneID: record.recordID.zoneID
+            )
+            return try await recordIfExists(for: shareID) as? CKShare
+        }
+
+        guard let serverRoot = try await recordIfExists(for: record.recordID),
+              let shareID = serverRoot.share?.recordID else {
+            return nil
+        }
+
+        return try await recordIfExists(for: shareID) as? CKShare
+    }
+
+    /// Treat only CloudKit's explicit "not found" result as absence. Connectivity,
+    /// authentication, and permission errors must reach the caller instead of causing
+    /// a second share creation attempt.
+    func recordIfExists(for recordID: CKRecord.ID) async throws -> CKRecord? {
+        do {
+            return try await record(for: recordID)
+        } catch let error as CKError where error.code == .unknownItem {
+            return nil
+        }
     }
 }
