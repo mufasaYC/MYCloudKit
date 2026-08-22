@@ -92,35 +92,38 @@ def required_string(app: dict[str, Any], key: str) -> str:
     return value
 
 
+def table_safe(value: str, *, attribute: bool = False) -> str:
+    """Escape App Store metadata for an HTML value inside a Markdown table."""
+    return html.escape(value, quote=attribute).replace("|", "&#124;")
+
+
 def render_showcase(apps: list[dict[str, Any]]) -> str:
     if not apps:
         return "_No apps have been added yet. Be the first!_"
 
-    cards: list[str] = []
+    rows = [
+        "| Icon | App | Developer | Category |",
+        "| :--: | :-- | :-- | :-- |",
+    ]
     for app in apps:
         app_id = app.get("trackId")
         if not isinstance(app_id, int):
             raise ShowcaseError("An App Store result is missing trackId.")
 
-        name = html.escape(required_string(app, "trackName"))
-        developer = html.escape(required_string(app, "artistName"))
-        genre = html.escape(required_string(app, "primaryGenreName"))
-        url = html.escape(required_string(app, "trackViewUrl"), quote=True)
-        icon = html.escape(required_string(app, "artworkUrl100"), quote=True)
-        cards.append(
-            "<td align=\"center\" width=\"180\">\n"
-            f"  <a href=\"{url}\">\n"
-            f"    <img src=\"{icon}\" width=\"80\" height=\"80\" alt=\"{name} app icon\"><br>\n"
-            f"    <strong>{name}</strong>\n"
-            "  </a><br>\n"
-            f"  <sub>{developer}<br>{genre}</sub>\n"
-            "</td>"
+        raw_name = required_string(app, "trackName")
+        name = table_safe(raw_name)
+        name_attribute = table_safe(raw_name, attribute=True)
+        developer = table_safe(required_string(app, "artistName"))
+        genre = table_safe(required_string(app, "primaryGenreName"))
+        url = table_safe(required_string(app, "trackViewUrl"), attribute=True)
+        icon = table_safe(required_string(app, "artworkUrl100"), attribute=True)
+        rows.append(
+            f'| <a href="{url}"><img src="{icon}" width="56" height="56" '
+            f'alt="{name_attribute} app icon"></a> | <a href="{url}"><strong>{name}</strong></a> '
+            f"| {developer} | {genre} |"
         )
 
-    rows = []
-    for index in range(0, len(cards), 4):
-        rows.append("<tr>\n" + "\n".join(cards[index : index + 4]) + "\n</tr>")
-    return "<table>\n" + "\n".join(rows) + "\n</table>"
+    return "\n".join(rows)
 
 
 def update_readme(readme: str, rendered_showcase: str) -> str:
