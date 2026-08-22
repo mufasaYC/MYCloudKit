@@ -31,6 +31,8 @@ If A is the parent of B and B is the parent of C, sharing A would share A, B and
 
 Use the `myProperties` dictionary to define each field using `MYRecordValue` (e.g. .string, .bool, .reference, etc.).
 
+> CloudKit reserves `creationDate`, `creatorUserRecordID`, `lastModifiedUserRecordID`, `modificationDate`, `recordChangeTag`, `recordID`, and `recordType` for record metadata. MYCloudKit fails with a descriptive assertion if `myProperties` contains one of these keys. Rename the mapped key—for example, use `createdAt` instead of `creationDate`.
+
 ### Example: Syncing a Task Model
 
 ```swift

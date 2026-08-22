@@ -2,14 +2,26 @@
 //  Created by Mustafa Yusuf on 06/05/25.
 //
 
+import CloudKit
 import Foundation
 
 extension MYSyncEngine {
     
     /// Creates or updates a transaction for a given record that conforms to `MYRecordConvertible`.
     /// - Parameter record: The record that needs to be created or updated.
-    /// - Returns: A `Transaction` object representing the create/update transaction.
-    func getCreateUpdateTransaction(for record: any MYRecordConvertible) -> Transaction {
+    /// - Returns: A transaction, or `nil` when the record uses a CloudKit-reserved field key.
+    func getCreateUpdateTransaction(for record: any MYRecordConvertible) -> Transaction? {
+        let invalidKeys = CKRecord.reservedCustomFieldKeys(in: record.myProperties.keys)
+        guard invalidKeys.isEmpty else {
+            let message = CKRecord.reservedCustomFieldKeyMessage(
+                keys: invalidKeys,
+                recordType: record.myRecordType
+            )
+            logger.log(message, level: .error)
+            assertionFailure(message)
+            return nil
+        }
+
         var transaction: Transaction = .init(
             id: .init(),
             operationType: .createOrUpdate,
@@ -171,7 +183,9 @@ extension MYSyncEngine {
         }
         
         // Get the transaction for creating or updating the record
-        let transaction = getCreateUpdateTransaction(for: record)
+        guard let transaction = getCreateUpdateTransaction(for: record) else {
+            return
+        }
         
         // Add the transaction to the queue and trigger the sync operation
         self.queue.append(transaction)
