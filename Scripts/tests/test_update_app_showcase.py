@@ -11,6 +11,7 @@ from update_app_showcase import (  # noqa: E402
     END_MARKER,
     START_MARKER,
     ShowcaseError,
+    build_icon_asset,
     load_registry,
     render_showcase,
     update_readme,
@@ -58,6 +59,12 @@ class UpdateAppShowcaseTests(unittest.TestCase):
         self.assertIn("a=1&amp;b=2", rendered)
         self.assertIn("| Icon | App | Developer | Category |", rendered)
         self.assertNotIn("<td", rendered)
+
+    def test_build_icon_asset_applies_estimated_apple_corner_radius(self):
+        rendered = build_icon_asset(b"image data", "image/png")
+        self.assertIn('rx="22"', rendered)
+        self.assertIn('ry="22"', rendered)
+        self.assertIn("data:image/png;base64,aW1hZ2UgZGF0YQ==", rendered)
 
     def test_update_readme_only_replaces_marked_content(self):
         readme = f"Before\n{START_MARKER}\nold\n{END_MARKER}\nAfter\n"

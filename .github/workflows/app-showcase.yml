@@ -69,7 +69,9 @@ jobs:
           --registry "${RUNNER_TEMP}/app.json"
 
       - name: Preserve generated README
-        run: cp README.md "${RUNNER_TEMP}/README.md"
+        run: |
+          cp README.md "${RUNNER_TEMP}/README.md"
+          cp -R .github/assets/app-icons "${RUNNER_TEMP}/app-icons"
 
       - name: Check out pull request branch
         uses: actions/checkout@v4
@@ -82,12 +84,15 @@ jobs:
         run: |
           rm -f README.md
           cp "${RUNNER_TEMP}/README.md" README.md
-          if git diff --quiet -- README.md; then
+          rm -rf .github/assets/app-icons
+          mkdir -p .github/assets
+          cp -R "${RUNNER_TEMP}/app-icons" .github/assets/app-icons
+          if git diff --quiet -- README.md .github/assets/app-icons; then
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add README.md
+          git add -A README.md .github/assets/app-icons
           git commit -m "docs: refresh app showcase"
           git push origin "HEAD:${HEAD_REF}"
 
@@ -110,11 +115,11 @@ jobs:
 
       - name: Commit refreshed metadata
         run: |
-          if git diff --quiet -- README.md; then
+          if git diff --quiet -- README.md .github/assets/app-icons; then
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add README.md
+          git add -A README.md .github/assets/app-icons
           git commit -m "docs: refresh app showcase"
           git push

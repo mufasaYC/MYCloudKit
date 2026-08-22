@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import html
 import json
+import os
 import sys
 import urllib.parse
 import urllib.request
@@ -16,6 +18,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REGISTRY = ROOT / "app.json"
 DEFAULT_README = ROOT / "README.md"
+DEFAULT_ASSETS_DIRECTORY = ROOT / ".github" / "assets" / "app-icons"
 START_MARKER = "<!-- apps-using-mycloudkit:start -->"
 END_MARKER = "<!-- apps-using-mycloudkit:end -->"
 
@@ -83,6 +86,48 @@ def fetch_apps(app_ids: list[int]) -> list[dict[str, Any]]:
     return [results_by_id[app_id] for app_id in app_ids]
 
 
+def build_icon_asset(image_data: bytes, content_type: str) -> str:
+    if not content_type.startswith("image/"):
+        raise ShowcaseError(f"App icon has unsupported content type {content_type}.")
+
+    encoded_image = base64.b64encode(image_data).decode("ascii")
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">\n'
+        "  <defs>\n"
+        '    <clipPath id="app-icon-mask">\n'
+        '      <rect width="100" height="100" rx="22" ry="22"/>\n'
+        "    </clipPath>\n"
+        "  </defs>\n"
+        f'  <image width="100" height="100" preserveAspectRatio="xMidYMid slice" '
+        f'clip-path="url(#app-icon-mask)" href="data:{content_type};base64,{encoded_image}"/>\n'
+        "</svg>\n"
+    )
+
+
+def fetch_icon_assets(apps: list[dict[str, Any]]) -> dict[int, str]:
+    assets: dict[int, str] = {}
+    for app in apps:
+        app_id = app.get("trackId")
+        if not isinstance(app_id, int):
+            raise ShowcaseError("An App Store result is missing trackId.")
+
+        icon_url = required_string(app, "artworkUrl100")
+        request = urllib.request.Request(
+            icon_url,
+            headers={"User-Agent": "MYCloudKit-App-Showcase/1.0"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                image_data = response.read()
+                content_type = response.headers.get_content_type()
+        except OSError as error:
+            raise ShowcaseError(f"App icon lookup failed for {app_id}: {error}") from error
+
+        assets[app_id] = build_icon_asset(image_data, content_type)
+
+    return assets
+
+
 def required_string(app: dict[str, Any], key: str) -> str:
     value = app.get(key)
     if not isinstance(value, str) or not value:
@@ -97,7 +142,9 @@ def table_safe(value: str, *, attribute: bool = False) -> str:
     return html.escape(value, quote=attribute).replace("|", "&#124;")
 
 
-def render_showcase(apps: list[dict[str, Any]]) -> str:
+def render_showcase(
+    apps: list[dict[str, Any]], icon_sources: dict[int, str] | None = None
+) -> str:
     if not apps:
         return "_No apps have been added yet. Be the first!_"
 
@@ -116,7 +163,12 @@ def render_showcase(apps: list[dict[str, Any]]) -> str:
         developer = table_safe(required_string(app, "artistName"))
         genre = table_safe(required_string(app, "primaryGenreName"))
         url = table_safe(required_string(app, "trackViewUrl"), attribute=True)
-        icon = table_safe(required_string(app, "artworkUrl100"), attribute=True)
+        icon_source = (
+            icon_sources[app_id]
+            if icon_sources is not None
+            else required_string(app, "artworkUrl100")
+        )
+        icon = table_safe(icon_source, attribute=True)
         rows.append(
             f'| <a href="{url}"><img src="{icon}" width="56" height="56" '
             f'alt="{name_attribute} app icon"></a> | <a href="{url}"><strong>{name}</strong></a> '
@@ -147,6 +199,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--check", action="store_true", help="Fail if README is stale.")
     parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
     parser.add_argument("--readme", type=Path, default=DEFAULT_README)
+    parser.add_argument(
+        "--assets-directory", type=Path, default=DEFAULT_ASSETS_DIRECTORY
+    )
     return parser.parse_args()
 
 
@@ -155,22 +210,57 @@ def main() -> int:
     try:
         entries = load_registry(arguments.registry)
         apps = fetch_apps(entries)
+        icon_assets = fetch_icon_assets(apps)
+        icon_sources = {}
+        for app_id in icon_assets:
+            relative_asset_path = os.path.relpath(
+                arguments.assets_directory / f"{app_id}.svg",
+                arguments.readme.parent,
+            )
+            icon_sources[app_id] = Path(relative_asset_path).as_posix()
         existing_readme = arguments.readme.read_text(encoding="utf-8")
-        generated_readme = update_readme(existing_readme, render_showcase(apps))
+        generated_readme = update_readme(
+            existing_readme, render_showcase(apps, icon_sources)
+        )
     except (OSError, ShowcaseError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
 
     if arguments.check:
-        if generated_readme != existing_readme:
+        stale_assets = [
+            app_id
+            for app_id, content in icon_assets.items()
+            if not (arguments.assets_directory / f"{app_id}.svg").is_file()
+            or (arguments.assets_directory / f"{app_id}.svg").read_text(encoding="utf-8")
+            != content
+        ]
+        expected_asset_paths = {
+            arguments.assets_directory / f"{app_id}.svg" for app_id in icon_assets
+        }
+        extra_assets = {
+            path
+            for path in arguments.assets_directory.glob("*.svg")
+            if path.stem.isdigit() and path not in expected_asset_paths
+        }
+        if generated_readme != existing_readme or stale_assets or extra_assets:
             print(
-                "error: README app showcase is stale; run "
+                "error: README app showcase or icon assets are stale; run "
                 "python3 Scripts/update_app_showcase.py",
                 file=sys.stderr,
             )
             return 1
         print("README app showcase is up to date.")
         return 0
+
+    arguments.assets_directory.mkdir(parents=True, exist_ok=True)
+    expected_asset_paths = set()
+    for app_id, content in icon_assets.items():
+        asset_path = arguments.assets_directory / f"{app_id}.svg"
+        asset_path.write_text(content, encoding="utf-8")
+        expected_asset_paths.add(asset_path)
+    for asset_path in arguments.assets_directory.glob("*.svg"):
+        if asset_path.stem.isdigit() and asset_path not in expected_asset_paths:
+            asset_path.unlink()
 
     arguments.readme.write_text(generated_readme, encoding="utf-8")
     print(f"Updated {arguments.readme} with {len(apps)} app(s).")
