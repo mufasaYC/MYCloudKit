@@ -4,7 +4,7 @@ on:
   pull_request:
     paths:
       - AppsUsingMYCloudKit.json
-      - README.md
+      - .github/workflows/app-showcase.yml
       - Scripts/update_app_showcase.py
       - Scripts/tests/test_update_app_showcase.py
   push:
@@ -29,11 +29,8 @@ jobs:
       - name: Test generator
         run: python3 -m unittest discover -s Scripts/tests
 
-      - name: Generate app showcase
+      - name: Validate App Store IDs
         run: python3 Scripts/update_app_showcase.py
-
-      - name: Verify pull request is up to date
-        run: git diff --exit-code -- README.md
 
   update:
     if: github.event_name != 'pull_request'
