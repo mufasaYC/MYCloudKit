@@ -29,6 +29,10 @@ extension MYSyncEngine {
             
             // Attempt to fetch data from the shared CloudKit database
             try await self.fetch(in: .shared)
+
+            // Keep requesting encrypted-data-reset recovery until the delegate confirms
+            // that all affected local records have been queued through MYCloudKit.
+            await requestPendingZoneResyncIfNeeded()
             
             // If both fetches succeed, update the fetch state with completion time
             return .completed(date: .now)
@@ -60,6 +64,7 @@ extension MYSyncEngine {
         // Track new and deleted record zones
         var newZoneIDs: [CKRecordZone.ID] = []
         var deletedZoneIDs: [CKRecordZone.ID] = []
+        var encryptedDataResetZoneIDs: [CKRecordZone.ID] = []
         
         // Temporary storage for records to save and delete
         var recordsToSave: [CKRecord] = []
@@ -75,9 +80,13 @@ extension MYSyncEngine {
         // Step 1: Fetch database-level changes (zone creations/deletions)
         do {
             repeat {
-                let response = try await database.databaseChanges(since: databaseChangeToken)
-                deletedZoneIDs.append(contentsOf: response.deletions.map { $0.zoneID })
-                newZoneIDs.append(contentsOf: response.modifications.map { $0.zoneID })
+                let response = try await databaseChanges(
+                    in: database,
+                    since: databaseChangeToken
+                )
+                deletedZoneIDs.append(contentsOf: response.deletions)
+                encryptedDataResetZoneIDs.append(contentsOf: response.encryptedDataResets)
+                newZoneIDs.append(contentsOf: response.modifications)
                 databaseChangeToken = response.changeToken
                 moreComing = response.moreComing
             } while moreComing
@@ -90,6 +99,10 @@ extension MYSyncEngine {
                 throw error
             }
         }
+
+        // Persist recovery before advancing the database token, preserve local app data,
+        // and discard only stale CloudKit metadata for the reset zones.
+        try prepareForEncryptedDataReset(in: encryptedDataResetZoneIDs)
         
         // Step 2: Prepare the full list of zone IDs to fetch record changes from
         let existingZoneIDs: [CKRecordZone.ID] = cache.getZoneIDs()
@@ -227,6 +240,104 @@ extension MYSyncEngine {
             "✅ Finished fetch in \(scope.name) scope",
             level: .debug
         )
+    }
+
+    private func databaseChanges(
+        in database: CKDatabase,
+        since changeToken: CKServerChangeToken?
+    ) async throws -> (
+        modifications: [CKRecordZone.ID],
+        deletions: [CKRecordZone.ID],
+        encryptedDataResets: [CKRecordZone.ID],
+        changeToken: CKServerChangeToken,
+        moreComing: Bool
+    ) {
+        try await withCheckedThrowingContinuation { continuation in
+            var modifications: [CKRecordZone.ID] = []
+            var deletions: [CKRecordZone.ID] = []
+            var encryptedDataResets: [CKRecordZone.ID] = []
+            let operation = CKFetchDatabaseChangesOperation(
+                previousServerChangeToken: changeToken
+            )
+            operation.fetchAllChanges = false
+            operation.recordZoneWithIDChangedBlock = { zoneID in
+                modifications.append(zoneID)
+            }
+            operation.recordZoneWithIDWasDeletedBlock = { zoneID in
+                deletions.append(zoneID)
+            }
+            operation.recordZoneWithIDWasPurgedBlock = { zoneID in
+                deletions.append(zoneID)
+            }
+            operation.recordZoneWithIDWasDeletedDueToUserEncryptedDataResetBlock = { zoneID in
+                encryptedDataResets.append(zoneID)
+            }
+            operation.fetchDatabaseChangesResultBlock = { result in
+                switch result {
+                    case .success((let serverChangeToken, let moreComing)):
+                        continuation.resume(
+                            returning: (
+                                modifications: modifications,
+                                deletions: deletions,
+                                encryptedDataResets: encryptedDataResets,
+                                changeToken: serverChangeToken,
+                                moreComing: moreComing
+                            )
+                        )
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                }
+            }
+            database.add(operation)
+        }
+    }
+
+    private func prepareForEncryptedDataReset(in zoneIDs: [CKRecordZone.ID]) throws {
+        guard !zoneIDs.isEmpty else {
+            return
+        }
+
+        let uniqueZoneIDs = Array(Set(zoneIDs))
+        try cache.addPendingZoneResyncIDs(uniqueZoneIDs)
+
+        for zoneID in uniqueZoneIDs {
+            userDefaults.setServerChangeToken(nil, for: zoneID)
+            cache.deleteZoneID(zoneID)
+            cache.deleteEncodedSystemFields(in: zoneID)
+            logger.log(
+                "🔐 Encrypted data reset detected for zone '\(zoneID.zoneName)'; local data will be preserved and requested for resync",
+                level: .warning
+            )
+        }
+    }
+
+    func requestPendingZoneResyncIfNeeded() async {
+        let pendingZoneIDs = cache.pendingZoneResyncIDs()
+        guard !pendingZoneIDs.isEmpty else {
+            return
+        }
+
+        let groupIDs = Array(Set(pendingZoneIDs.map(\.zoneName))).sorted()
+        guard let delegate else {
+            return
+        }
+
+        if await delegate.didReceiveGroupIDsToResync(groupIDs) {
+            do {
+                try cache.removePendingZoneResyncIDs(pendingZoneIDs)
+                logger.log(
+                    "✅ Delegate queued local records for \(groupIDs.count) encrypted-data-reset zone(s)",
+                    level: .debug
+                )
+            } catch {
+                logger.log("🛑 Failed to acknowledge encrypted-data-reset recovery", error: error)
+            }
+        } else {
+            logger.log(
+                "⚠️ Waiting for delegate to queue local records for \(groupIDs.count) encrypted-data-reset zone(s)",
+                level: .warning
+            )
+        }
     }
     
     /// Processes and handles a list of CKRecord objects that were successfully saved.

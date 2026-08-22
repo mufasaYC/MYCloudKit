@@ -20,6 +20,10 @@ extension MYSyncEngine {
         private var zoneIDsFileURL: URL {
             cacheDirectoryURL.appendingPathComponent("zoneIDs.json")
         }
+
+        private var pendingZoneResyncIDsFileURL: URL {
+            cacheDirectoryURL.appendingPathComponent("pendingZoneResyncIDs.json")
+        }
         
         private var encodedSystemFieldsDirectoryURL: URL {
             cacheDirectoryURL.appendingPathComponent("EncodedSystemFieldsData")
@@ -43,6 +47,19 @@ extension MYSyncEngine {
             
             self.cacheDirectoryURL = documentDirectory.appendingPathComponent("MYCloudKit")
             self.logger = logger
+
+            prepareDirectories()
+        }
+
+        /// Creates an isolated cache for tests and other internal tooling.
+        init(cacheDirectoryURL: URL, logger: Logger) {
+            self.cacheDirectoryURL = cacheDirectoryURL
+            self.logger = logger
+
+            prepareDirectories()
+        }
+
+        private func prepareDirectories() {
             
             // Ensure cache directory exists
             if !fileManager.fileExists(atPath: cacheDirectoryURL.path) {
@@ -138,13 +155,38 @@ extension MYSyncEngine.Cache {
             .appendingPathExtension("bin")
         return try? Data(contentsOf: url)
     }
+
+    /// Removes cached CloudKit system fields only for records in the specified zone.
+    /// Records re-uploaded after an encrypted-data reset must not reuse stale change tags.
+    func deleteEncodedSystemFields(in zoneID: CKRecordZone.ID) {
+        do {
+            let fileURLs = try fileManager.contentsOfDirectory(
+                at: encodedSystemFieldsDirectoryURL,
+                includingPropertiesForKeys: nil
+            )
+
+            for fileURL in fileURLs where fileURL.pathExtension == "bin" {
+                guard let data = try? Data(contentsOf: fileURL),
+                      let record = CKRecord(data: data),
+                      record.recordID.zoneID == zoneID else {
+                    continue
+                }
+                try fileManager.removeItem(at: fileURL)
+            }
+        } catch {
+            logger.log(
+                "🛑 Failed to clear encoded system fields for zone '\(zoneID.zoneName)'",
+                error: error
+            )
+        }
+    }
 }
 
 // MARK: - Zone ID Caching
 
 extension MYSyncEngine.Cache {
     
-    fileprivate struct ZoneID: Codable {
+    struct ZoneID: Codable, Hashable {
         let zoneName: String
         let ownerName: String
         
@@ -187,5 +229,51 @@ extension MYSyncEngine.Cache {
         }
         newZoneIDs.remove(at: index)
         setZoneIDs(newZoneIDs)
+    }
+}
+
+// MARK: - Encrypted Data Reset Recovery
+
+extension MYSyncEngine.Cache {
+    /// Adds zones that must be re-uploaded, preserving existing requests across launches.
+    func addPendingZoneResyncIDs(_ zoneIDs: [CKRecordZone.ID]) throws {
+        guard !zoneIDs.isEmpty else {
+            return
+        }
+
+        let existingZones = pendingZoneResyncIDs().map(ZoneID.init(zone:))
+        let addedZones = zoneIDs.map(ZoneID.init(zone:))
+        try setPendingZoneResyncIDs(Array(Set(existingZones + addedZones)))
+    }
+
+    /// Returns all zones awaiting delegate acknowledgment.
+    func pendingZoneResyncIDs() -> [CKRecordZone.ID] {
+        do {
+            let data = try Data(contentsOf: pendingZoneResyncIDsFileURL)
+            let zones = try JSONDecoder().decode([ZoneID].self, from: data)
+            return zones.map(\.asCKRecordZoneID)
+        } catch {
+            return []
+        }
+    }
+
+    /// Removes only the zones included in a successful delegate acknowledgment.
+    func removePendingZoneResyncIDs(_ zoneIDs: [CKRecordZone.ID]) throws {
+        let acknowledgedZoneIDs = Set(zoneIDs.map(ZoneID.init(zone:)))
+        let remainingZoneIDs = pendingZoneResyncIDs()
+            .map(ZoneID.init(zone:))
+            .filter { !acknowledgedZoneIDs.contains($0) }
+        try setPendingZoneResyncIDs(remainingZoneIDs)
+    }
+
+    private func setPendingZoneResyncIDs(_ zoneIDs: [ZoneID]) throws {
+        let sortedZoneIDs = zoneIDs.sorted {
+            if $0.ownerName == $1.ownerName {
+                return $0.zoneName < $1.zoneName
+            }
+            return $0.ownerName < $1.ownerName
+        }
+        let data = try JSONEncoder().encode(sortedZoneIDs)
+        try data.write(to: pendingZoneResyncIDsFileURL, options: .atomic)
     }
 }
