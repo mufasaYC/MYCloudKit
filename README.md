@@ -264,7 +264,7 @@ func application(
 <!-- apps-using-mycloudkit:end -->
 
 Is your app built with `MYCloudKit`? Add its numeric App Store ID to
-[`AppsUsingMYCloudKit.json`](AppsUsingMYCloudKit.json):
+[`app.json`](app.json):
 
 ```json
 {
@@ -276,8 +276,9 @@ Is your app built with `MYCloudKit`? Add its numeric App Store ID to
 
 The app's name, developer, icon, category, and link are fetched from Apple's
 public App Store lookup API. Open a pull request with the new ID; GitHub
-validates it and updates this showcase automatically after the pull request is
-merged.
+validates it and updates the showcase on the pull request automatically. A
+post-merge refresh handles contributions from forks, which GitHub does not let
+the repository bot modify directly.
 
 ### Sample project
 

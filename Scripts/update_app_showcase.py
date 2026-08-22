@@ -14,7 +14,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_REGISTRY = ROOT / "AppsUsingMYCloudKit.json"
+DEFAULT_REGISTRY = ROOT / "app.json"
 DEFAULT_README = ROOT / "README.md"
 START_MARKER = "<!-- apps-using-mycloudkit:start -->"
 END_MARKER = "<!-- apps-using-mycloudkit:end -->"
