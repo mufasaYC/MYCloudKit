@@ -20,6 +20,7 @@ public typealias MYRecordType = String
 /// - **didReceiveRecordsToSave**: Called when new or updated records are ready to be saved locally.
 /// - **didReceiveRecordsToDelete**: Called when records need to be deleted from local storage.
 /// - **didReceiveGroupIDsToDelete**: Called when groups need to be removed - a group can be anything that is put as `myRootGroupID` in `MYRecordConvertible`.
+/// - **didReceiveGroupIDsToResync**: Called after an encrypted-data reset so the app can queue every local record in the affected groups for upload again.
 /// - **handleUnsyncableRecord**: Handles records that failed to sync, allowing for custom resolution logic and retries, you can see the reason and then add records that need to be synced before it or send over the corrected record and it will put this in place of the current record in the queue position.
 /// - **syncableRecordTypesInDependencyOrder**: Returns the list of record types eligible for syncing in the correct order (parent and references before child and records referenced respectably).
 ///
@@ -74,6 +75,20 @@ public protocol MYSyncDelegate: AnyObject {
     ///
     /// - Parameter ids: An array of group identifiers that should be deleted from the local store.
     func didReceiveGroupIDsToDelete(_ ids: [String]) async -> Bool
+
+    /// Called when CloudKit deletes zones because the user reset their encrypted iCloud data.
+    ///
+    /// Local data for these groups must be preserved. Queue every local record belonging to
+    /// these groups through `MYSyncEngine.sync(_:)`, then return `true`. The acknowledgment
+    /// means the records are durably queued by MYCloudKit; it does not mean that CloudKit has
+    /// finished uploading them.
+    ///
+    /// MYCloudKit persists unacknowledged group IDs and calls this method again after every
+    /// successful fetch until it returns `true`.
+    ///
+    /// - Parameter ids: Group identifiers corresponding to the reset CloudKit zones.
+    /// - Returns: `true` only after all local records in every supplied group have been queued.
+    func didReceiveGroupIDsToResync(_ ids: [String]) async -> Bool
     
     /// Called when a specific record could not be synced successfully, allowing the delegate to correct and optionally retry syncing it.
     ///
@@ -112,4 +127,12 @@ public protocol MYSyncDelegate: AnyObject {
     /// }
     /// ```
     func syncableRecordTypesInDependencyOrder() -> [MYRecordType]
+}
+
+public extension MYSyncDelegate {
+    /// Preserves source compatibility for apps that have not opted into encrypted-data-reset recovery.
+    /// Returning `false` keeps the recovery request pending for a future successful fetch.
+    func didReceiveGroupIDsToResync(_ ids: [String]) async -> Bool {
+        false
+    }
 }
