@@ -11,3 +11,4 @@ fastlane/*
 !fastlane/Pluginfile
 
 docs/
+__pycache__/

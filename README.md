@@ -217,8 +217,76 @@ func application(
 > Note: These push notifications aren't received on simulator. Works only on a real device. 
 > This allows your app to stay updated by fetching the latest changes from CloudKit as soon as a silent push notification is received. MYCloudKit automatically sets up silent push notifications to be fired when any records are changes in the user's private or shared database.
 
-## Sample app with `MYCloudKit`
-[Bad Habit Tracker App](https://github.com/mufasaYC/Bad-Habits)
+## Apps using `MYCloudKit`
+
+<!-- apps-using-mycloudkit:start -->
+<table>
+<tr>
+<td align="center" width="180">
+  <a href="https://apps.apple.com/us/app/tasks-reminders-to-do-list/id1502903102?uo=4">
+    <img src="https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/a3/24/9b/a3249b04-0024-c454-6be0-598f738b05e7/AppIcon-0-0-1x_U007epad-0-0-0-1-0-0-sRGB-85-220.png/100x100bb.jpg" width="80" height="80" alt="Tasks: Reminders &amp; To Do List app icon"><br>
+    <strong>Tasks: Reminders &amp; To Do List</strong>
+  </a><br>
+  <sub>Msquare Labs Technologies Private Limited<br>Productivity<br>App Store ID 1502903102</sub>
+</td>
+<td align="center" width="180">
+  <a href="https://apps.apple.com/us/app/pediapal-child-health-monitor/id6739232517?uo=4">
+    <img src="https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/72/db/02/72db0200-910f-2aa9-197c-e0d6098f2b59/AppIcon-0-0-1x_U007ephone-0-0-0-1-0-0-sRGB-85-220.png/100x100bb.jpg" width="80" height="80" alt="Pediapal: Child Health Monitor app icon"><br>
+    <strong>Pediapal: Child Health Monitor</strong>
+  </a><br>
+  <sub>Aberfeldy Studios, LLC<br>Health &amp; Fitness<br>App Store ID 6739232517</sub>
+</td>
+<td align="center" width="180">
+  <a href="https://apps.apple.com/us/app/art-of-fauna-cozy-puzzles/id1630468596?uo=4">
+    <img src="https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/41/17/29/4117292b-6446-8fe8-9786-9756179a91f5/AppIconNormal-0-0-1x_U007epad-0-0-0-1-0-0-sRGB-85-220.png/100x100bb.jpg" width="80" height="80" alt="Art of Fauna: Cozy Puzzles app icon"><br>
+    <strong>Art of Fauna: Cozy Puzzles</strong>
+  </a><br>
+  <sub>Klemens Strasser<br>Games<br>App Store ID 1630468596</sub>
+</td>
+<td align="center" width="180">
+  <a href="https://apps.apple.com/us/app/art-of-flora-cozy-puzzles/id6743834964?uo=4">
+    <img src="https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/34/e2/08/34e20831-dcaf-5463-f933-3600e5aa152b/AppIcon-0-0-1x_U007epad-0-0-0-1-0-0-sRGB-85-220.png/100x100bb.jpg" width="80" height="80" alt="Art of Flora: Cozy Puzzles app icon"><br>
+    <strong>Art of Flora: Cozy Puzzles</strong>
+  </a><br>
+  <sub>Klemens Strasser<br>Games<br>App Store ID 6743834964</sub>
+</td>
+</tr>
+<tr>
+<td align="center" width="180">
+  <a href="https://apps.apple.com/us/app/pocketshelf-tbr-book-tracker/id6745476834?uo=4">
+    <img src="https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/51/5f/08/515f0850-08f0-8169-4d56-a1c7863beed6/AppIcon-0-0-1x_U007epad-0-0-0-1-0-0-sRGB-85-220.png/100x100bb.jpg" width="80" height="80" alt="PocketShelf: TBR Book Tracker app icon"><br>
+    <strong>PocketShelf: TBR Book Tracker</strong>
+  </a><br>
+  <sub>Klemens Strasser<br>Book<br>App Store ID 6745476834</sub>
+</td>
+</tr>
+</table>
+<!-- apps-using-mycloudkit:end -->
+
+Is your app built with `MYCloudKit`? Add its numeric App Store ID to
+[`AppsUsingMYCloudKit.json`](AppsUsingMYCloudKit.json):
+
+```json
+{
+  "appStoreIds": [
+    1234567890
+  ]
+}
+```
+
+Then run:
+
+```sh
+python3 Scripts/update_app_showcase.py
+```
+
+The app's name, developer, icon, category, and link are fetched from Apple's
+public App Store lookup API.
+
+### Sample project
+
+[Bad Habit Tracker App](https://github.com/mufasaYC/Bad-Habits) is a small
+example project demonstrating `MYCloudKit`.
 
 ## ☁️ Built with Care
 
