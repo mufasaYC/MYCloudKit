@@ -14,7 +14,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_REGISTRY = ROOT / "AppsUsingMYCloudKit.json"
+DEFAULT_REGISTRY = ROOT / "app.json"
 DEFAULT_README = ROOT / "README.md"
 START_MARKER = "<!-- apps-using-mycloudkit:start -->"
 END_MARKER = "<!-- apps-using-mycloudkit:end -->"
@@ -113,7 +113,7 @@ def render_showcase(apps: list[dict[str, Any]]) -> str:
             f"    <img src=\"{icon}\" width=\"80\" height=\"80\" alt=\"{name} app icon\"><br>\n"
             f"    <strong>{name}</strong>\n"
             "  </a><br>\n"
-            f"  <sub>{developer}<br>{genre}<br>App Store ID {app_id}</sub>\n"
+            f"  <sub>{developer}<br>{genre}</sub>\n"
             "</td>"
         )
 

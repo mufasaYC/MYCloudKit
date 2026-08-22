@@ -54,7 +54,7 @@ class UpdateAppShowcaseTests(unittest.TestCase):
         )
         self.assertIn("Notes &amp; Tasks", rendered)
         self.assertIn("Example &lt;Studio&gt;", rendered)
-        self.assertIn("App Store ID 123", rendered)
+        self.assertNotIn("App Store ID", rendered)
         self.assertIn("a=1&amp;b=2", rendered)
 
     def test_update_readme_only_replaces_marked_content(self):
