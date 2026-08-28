@@ -65,6 +65,23 @@ public final class MYSyncEngine: ObservableObject {
     
     /// The maximum number of retry attempts for failed sync operations.
     let maxRetryAttempts: Int
+
+    /// The CloudKit database scopes used by `fetch()` and automatic change subscriptions.
+    ///
+    /// By default, the engine monitors both the private and shared databases. Limit this set
+    /// when an app does not use one of those databases to avoid unnecessary CloudKit work.
+    public let databaseScopes: Set<CKDatabase.Scope>
+
+    /// Keeps scope-dependent work deterministic while allowing callers to configure scopes as a set.
+    var orderedDatabaseScopes: [CKDatabase.Scope] {
+        Self.orderedDatabaseScopes(from: databaseScopes)
+    }
+
+    static func orderedDatabaseScopes(
+        from databaseScopes: Set<CKDatabase.Scope>
+    ) -> [CKDatabase.Scope] {
+        [.private, .shared].filter { databaseScopes.contains($0) }
+    }
     
     private var syncWorkItem: DispatchWorkItem? = nil
     
@@ -131,17 +148,29 @@ public final class MYSyncEngine: ObservableObject {
     ///   - userDefaultsSuiteName: Optional suite name for using a shared `UserDefaults` instance, useful for app groups or extensions.
     ///   - maxRetryAttempts: The number of retry attempts before giving up on failed sync attempts. Defaults to 3.
     ///   - logLevel: The minimum log level to be printed. Defaults to `.debug`.
+    ///   - databaseScopes: At least one private and/or shared database to fetch and subscribe to. Defaults to both.
     public init(
         containerIdentifier: String? = nil,
         userDefaultsSuiteName: String? = nil,
         maxRetryAttempts: Int = 3,
-        logLevel: LogLevel = .debug
+        logLevel: LogLevel = .debug,
+        databaseScopes: Set<CKDatabase.Scope> = [.private, .shared]
     ) {
+        precondition(
+            !databaseScopes.isEmpty,
+            "MYSyncEngine requires at least one CloudKit database scope."
+        )
+        precondition(
+            databaseScopes.subtracting([.private, .shared]).isEmpty,
+            "MYSyncEngine supports only the private and shared CloudKit database scopes."
+        )
+
         let logger = Logger(currentLevel: logLevel)
         let syncCache: Cache = .init(suiteName: userDefaultsSuiteName, logger: logger)
         self.cache = syncCache
         self.queue = syncCache.retrieveTransactionQueue()
         self.logger = logger
+        self.databaseScopes = databaseScopes
         // Set the CKContainer to either custom or default.
         if let containerIdentifier {
             self.logger.log(
@@ -174,9 +203,10 @@ public final class MYSyncEngine: ObservableObject {
         
         self.maxRetryAttempts = maxRetryAttempts
         
-        // Subscribe to private and shared CloudKit database changes for real-time sync triggers.
-        self.subscribeToChanges(in: .private)
-        self.subscribeToChanges(in: .shared)
+        // Subscribe only to configured CloudKit database changes for real-time sync triggers.
+        self.orderedDatabaseScopes.forEach { scope in
+            self.subscribeToChanges(in: scope)
+        }
     }
     
     private func addForegroundNotificationObserver() {

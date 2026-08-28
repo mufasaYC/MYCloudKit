@@ -6,10 +6,10 @@ import CloudKit
 
 extension MYSyncEngine {
     
-    /// Asynchronously fetches data from both the private and shared CloudKit databases.
+    /// Asynchronously fetches data from the configured CloudKit databases.
     ///
     /// - This method updates the `fetchState` property to indicate the current status of the fetch process.
-    /// - It first sets the state to `.fetching`, then attempts to fetch changes from the `.private` and `.shared` databases.
+    /// - It fetches changes from each scope configured through `MYSyncEngine.init`.
     /// - On success, it sets the state to `.completed` with the current timestamp.
     /// - If an error occurs during the fetch, it logs the error and updates the state to `.stopped` with the error.
     ///
@@ -24,17 +24,15 @@ extension MYSyncEngine {
         }
         
         do {
-            // Attempt to fetch data from the private CloudKit database
-            try await self.fetch(in: .private)
-            
-            // Attempt to fetch data from the shared CloudKit database
-            try await self.fetch(in: .shared)
+            for scope in orderedDatabaseScopes {
+                try await self.fetch(in: scope)
+            }
 
             // Keep requesting encrypted-data-reset recovery until the delegate confirms
             // that all affected local records have been queued through MYCloudKit.
             await requestPendingZoneResyncIfNeeded()
             
-            // If both fetches succeed, update the fetch state with completion time
+            // If every configured fetch succeeds, update the fetch state with completion time
             return .completed(date: .now)
         } catch {
             // Log the error and update the fetch state to indicate failure

@@ -69,6 +69,17 @@ let syncEngine = MYSyncEngine()
 syncEngine.delegate = self  // Implement MYSyncDelegate to handle syncing and fetching
 ```
 
+By default, the engine fetches and subscribes to changes in both the private and shared
+CloudKit databases. If your app does not use sharing, limit it to the private database to
+avoid unnecessary CloudKit work:
+
+```swift
+let syncEngine = MYSyncEngine(databaseScopes: [.private])
+```
+
+You can likewise use `databaseScopes: [.shared]` for a shared-only fetch configuration.
+The public database is not supported.
+
 > Note: If you're going to be fetching/syncing from outside the main app target, make sure you provide `userDefaultsSuiteName` of the App Group so we can fetch correctly and efficiently.
 
 > Provide the correct `containerIdentifier` if you're not using the default one. 
@@ -101,7 +112,7 @@ syncEngine.delete(task)
 
 4. Fetching Records
 
-To fetch records from CloudKit, use the `fetch()` method. This fetches records modified or created since the last sync, ensuring your app stays up-to-date.
+To fetch records from CloudKit, use the `fetch()` method. This fetches records modified or created since the last sync from the database scopes configured when initializing the engine, ensuring your app stays up-to-date.
 
 Example of fetching records:
 
@@ -215,7 +226,7 @@ func application(
 }
 ```
 > Note: These push notifications aren't received on simulator. Works only on a real device. 
-> This allows your app to stay updated by fetching the latest changes from CloudKit as soon as a silent push notification is received. MYCloudKit automatically sets up silent push notifications to be fired when any records are changes in the user's private or shared database.
+> This allows your app to stay updated by fetching the latest changes from CloudKit as soon as a silent push notification is received. MYCloudKit automatically sets up silent push notifications for changes in the configured private and/or shared databases.
 
 ## Apps using `MYCloudKit`
 
