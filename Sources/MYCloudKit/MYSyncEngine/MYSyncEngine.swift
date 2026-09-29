@@ -170,6 +170,12 @@ public final class MYSyncEngine: ObservableObject {
         self.cache = syncCache
         self.queue = syncCache.retrieveTransactionQueue()
         self.logger = logger
+
+        // Reclaim staged assets left behind by transactions that already finished.
+        let queuedTransactionIDs = Set(queue.map(\.id))
+        DispatchQueue.global(qos: .utility).async {
+            syncCache.removeOrphanedTransactionFolders(keeping: queuedTransactionIDs)
+        }
         self.databaseScopes = databaseScopes
         // Set the CKContainer to either custom or default.
         if let containerIdentifier {

@@ -348,7 +348,8 @@ extension MYSyncEngine {
             self.handleError(error, for: transaction)
         }
         self.queue = queue.filter { !completedTransactionIDs.contains($0.id) }
-        
+        transactionsCompleted.forEach { self.cache.removeCache(for: $0) }
+
         if !transactionsFailed.isEmpty {
             throw transactionsFailed.first?.value ?? NSError(domain: "Something went wrong", code: 500)
         }

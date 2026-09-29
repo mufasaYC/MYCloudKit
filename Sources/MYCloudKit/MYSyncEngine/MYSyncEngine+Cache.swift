@@ -102,10 +102,13 @@ extension MYSyncEngine.Cache {
 // MARK: - Asset Storage
 
 extension MYSyncEngine.Cache {
+    private var transactionsDirectoryURL: URL {
+        cacheDirectoryURL.appendingPathComponent("transactions")
+    }
+
     /// Saves asset data (like images/files) to disk under a transaction-specific folder.
     func saveAssetData(_ data: Data, with key: String, for transaction: Transaction) throws -> URL {
-        let transactionFolderURL = cacheDirectoryURL
-            .appendingPathComponent("transactions")
+        let transactionFolderURL = transactionsDirectoryURL
             .appendingPathComponent(transaction.id.uuidString)
 
         if !fileManager.fileExists(atPath: transactionFolderURL.path) {
@@ -121,14 +124,65 @@ extension MYSyncEngine.Cache {
     /// Deletes cached asset data for a given transaction.
     func removeCache(for transaction: Transaction) {
         do {
-            let url = cacheDirectoryURL
-                .appendingPathComponent("transactions")
+            let url = transactionsDirectoryURL
                 .appendingPathComponent(transaction.id.uuidString)
             if fileManager.fileExists(atPath: url.path) {
                 try fileManager.removeItem(atPath: url.path)
             }
         } catch {
             logger.log("🛑 Failed to remove cache for transaction", error: error)
+        }
+    }
+
+    /// Re-anchors an asset URL staged by `saveAssetData` to the current cache directory.
+    ///
+    /// Queued transactions persist absolute URLs, but the app container path can change between
+    /// launches (e.g. after an app update). URLs that were not staged for this transaction,
+    /// such as caller-provided `fileURL` values, are returned unchanged.
+    func resolvedAssetURL(_ url: URL, for transaction: Transaction) -> URL {
+        let components = url.pathComponents
+        guard components.count >= 3,
+              components[components.count - 3] == "transactions",
+              components[components.count - 2] == transaction.id.uuidString else {
+            return url
+        }
+        return transactionsDirectoryURL
+            .appendingPathComponent(transaction.id.uuidString)
+            .appendingPathComponent(url.lastPathComponent)
+    }
+
+    /// Removes staged asset folders that no queued transaction references.
+    ///
+    /// Folders younger than `minimumAge` are kept, so a transaction that is still being staged
+    /// (possibly by another process sharing this cache) is never removed.
+    func removeOrphanedTransactionFolders(
+        keeping transactionIDs: Set<UUID>,
+        minimumAge: TimeInterval = 24 * 60 * 60,
+        now: Date = .now
+    ) {
+        let keys: [URLResourceKey] = [.creationDateKey, .contentModificationDateKey]
+        guard let folderURLs = try? fileManager.contentsOfDirectory(
+            at: transactionsDirectoryURL,
+            includingPropertiesForKeys: keys
+        ) else {
+            return
+        }
+
+        for folderURL in folderURLs {
+            if let id = UUID(uuidString: folderURL.lastPathComponent),
+               transactionIDs.contains(id) {
+                continue
+            }
+            let values = try? folderURL.resourceValues(forKeys: Set(keys))
+            guard let date = values?.creationDate ?? values?.contentModificationDate,
+                  now.timeIntervalSince(date) >= minimumAge else {
+                continue
+            }
+            do {
+                try fileManager.removeItem(at: folderURL)
+            } catch {
+                logger.log("🛑 Failed to remove orphaned transaction folder", error: error)
+            }
         }
     }
 }

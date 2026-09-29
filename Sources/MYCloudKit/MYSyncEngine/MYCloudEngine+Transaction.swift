@@ -256,7 +256,7 @@ extension MYSyncEngine.Transaction {
                     ckRecord[key] = date
                 case .asset(let assetURL):
                     if let assetURL {
-                        ckRecord[key] = CKAsset(fileURL: assetURL)
+                        ckRecord[key] = CKAsset(fileURL: cache.resolvedAssetURL(assetURL, for: self))
                     } else {
                         ckRecord[key] = nil
                     }
