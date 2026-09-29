@@ -80,6 +80,9 @@ let syncEngine = MYSyncEngine(databaseScopes: [.private])
 You can likewise use `databaseScopes: [.shared]` for a shared-only fetch configuration.
 The public database is not supported.
 
+`databaseScopes` controls what is fetched and subscribed to. Synced records are always uploaded
+to the database that owns their zone.
+
 > Note: If you're going to be fetching/syncing from outside the main app target, make sure you provide `userDefaultsSuiteName` of the App Group so we can fetch correctly and efficiently.
 
 > Provide the correct `containerIdentifier` if you're not using the default one. 

@@ -71,58 +71,25 @@ extension MYSyncEngine {
         guard let databaseScope = transactions.first?.databaseScope(using: cache) else {
             return
         }
-        var transactionsCompleted: [Transaction] = []
+        let plan = Self.planBatch(transactions, using: cache)
+        /// Transactions that can't be converted to a `CKRecord` are removed from the queue or retried.
+        plan.unparsable.forEach {
+            self.handleError(NSError(domain: "Cannot parse CKRecord", code: 500), for: $0)
+        }
+
+        var transactionsCompleted: [Transaction] = plan.completed
         var transactionsFailed: [Transaction: Error] = [:]
-        
+
         let database = ckContainer.database(with: databaseScope)
-        var recordIDTransactionMap: [CKRecord.ID: Transaction] = [:]
-        var zoneIDTransactionMap: [CKRecordZone.ID: Transaction] = [:]
-        var recordsToSave: [CKRecord] = []
-        var recordsToDelete: [CKRecord.ID] = []
-        var zonesToDelete: [CKRecordZone.ID] = []
-        var recordsToCascadeDelete: [CKRecord.ID] = []
+        let recordIDTransactionMap = plan.recordIDTransactionMap
+        let zoneIDTransactionMap = plan.zoneIDTransactionMap
+        let recordsToSave = plan.recordsToSave
+        let recordsToDelete = plan.recordsToDelete
+        let zonesToDelete = plan.zonesToDelete
+        let recordsToCascadeDelete = plan.recordsToCascadeDelete
         var missingZoneTransactionsByZoneID: [CKRecordZone.ID: [Transaction]] = [:]
         var missingZoneTransactionsToBeRetried: [Transaction] = []
-        
-        for transaction in transactions {
-            /// Convert the transaction to a `CKRecord`. If conversion fails, remove from queue and retry.
-            guard let ckRecord = transaction.asCKRecord(using: self.cache) else {
-                self.handleError(NSError(domain: "Cannot parse CKRecord", code: 500), for: transaction)
-                continue
-            }
-            switch transaction.operationType {
-                case .createOrUpdate:
-                    if recordsToDelete.contains(ckRecord.recordID) {
-                        transactionsCompleted.append(transaction)
-                    } else if recordIDTransactionMap[ckRecord.recordID] == nil {
-                        recordsToSave.append(ckRecord)
-                        recordIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID)
-                    }
-                case .deleteZone:
-                    if zoneIDTransactionMap[ckRecord.recordID.zoneID] == nil {
-                        zonesToDelete.append(ckRecord.recordID.zoneID)
-                        zoneIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID.zoneID)
-                    }
-                case .deleteRecord:
-                    if let saveIndex = recordsToSave.firstIndex(where: { $0.recordID == ckRecord.recordID }) {
-                        recordsToSave.remove(at: saveIndex)
-                        if let transaction = recordIDTransactionMap[ckRecord.recordID] {
-                            transactionsCompleted.append(transaction)
-                        } else {
-                            assertionFailure("How?")
-                        }
-                    }
-                    
-                    if !recordsToDelete.contains(ckRecord.recordID) {
-                        recordsToDelete.append(ckRecord.recordID)
-                        recordIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID)
-                    }
-                case .deleteChildRecords:
-                    recordsToCascadeDelete.append(ckRecord.recordID)
-                    recordIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID)
-            }
-        }
-        
+
         self.logger.log(
             "🌀 Syncing \(recordsToSave.count) '\(recordType)'\n🗑️ Deleting \(recordsToDelete.count) '\(recordType)'",
             level: .debug
@@ -357,6 +324,82 @@ extension MYSyncEngine {
         if !missingZoneTransactionsToBeRetried.isEmpty {
             try await self.syncTransactions(missingZoneTransactionsToBeRetried, recordType: recordType)
         }
+
+        /// Runs once this batch's deletes have completed, so queue order is preserved.
+        if !plan.deferred.isEmpty {
+            try await self.syncTransactions(plan.deferred, recordType: recordType)
+        }
+    }
+}
+
+extension MYSyncEngine {
+    /// The CloudKit work for one batch of transactions, before anything is sent.
+    struct BatchPlan {
+        var recordIDTransactionMap: [CKRecord.ID: Transaction] = [:]
+        var zoneIDTransactionMap: [CKRecordZone.ID: Transaction] = [:]
+        var recordsToSave: [CKRecord] = []
+        var recordsToDelete: [CKRecord.ID] = []
+        var zonesToDelete: [CKRecordZone.ID] = []
+        var recordsToCascadeDelete: [CKRecord.ID] = []
+
+        /// Transactions already satisfied by another operation in this batch.
+        var completed: [Transaction] = []
+
+        /// Transactions that must run after this batch finishes, to keep queue order.
+        var deferred: [Transaction] = []
+
+        /// Transactions that could not be converted to a `CKRecord`.
+        var unparsable: [Transaction] = []
+    }
+
+    /// Resolves a batch of queued transactions into the records and zones to save and delete.
+    ///
+    /// Transactions are applied in queue order:
+    /// - A save followed by a delete of the same record only deletes it.
+    /// - A delete followed by a save of the same record deletes it first, then saves it in a follow-up pass.
+    /// - Repeated saves of the same record upload the first one; the rest stay queued for the next sync.
+    static func planBatch(_ transactions: [Transaction], using cache: Cache) -> BatchPlan {
+        var plan = BatchPlan()
+
+        for transaction in transactions {
+            guard let ckRecord = transaction.asCKRecord(using: cache) else {
+                plan.unparsable.append(transaction)
+                continue
+            }
+            switch transaction.operationType {
+                case .createOrUpdate:
+                    if plan.recordsToDelete.contains(ckRecord.recordID) {
+                        plan.deferred.append(transaction)
+                    } else if plan.recordIDTransactionMap[ckRecord.recordID] == nil {
+                        plan.recordsToSave.append(ckRecord)
+                        plan.recordIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID)
+                    }
+                case .deleteZone:
+                    if plan.zoneIDTransactionMap[ckRecord.recordID.zoneID] == nil {
+                        plan.zonesToDelete.append(ckRecord.recordID.zoneID)
+                        plan.zoneIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID.zoneID)
+                    }
+                case .deleteRecord:
+                    if let saveIndex = plan.recordsToSave.firstIndex(where: { $0.recordID == ckRecord.recordID }) {
+                        plan.recordsToSave.remove(at: saveIndex)
+                        if let transaction = plan.recordIDTransactionMap[ckRecord.recordID] {
+                            plan.completed.append(transaction)
+                        } else {
+                            assertionFailure("How?")
+                        }
+                    }
+
+                    if !plan.recordsToDelete.contains(ckRecord.recordID) {
+                        plan.recordsToDelete.append(ckRecord.recordID)
+                        plan.recordIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID)
+                    }
+                case .deleteChildRecords:
+                    plan.recordsToCascadeDelete.append(ckRecord.recordID)
+                    plan.recordIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID)
+            }
+        }
+
+        return plan
     }
 }
 
