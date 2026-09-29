@@ -9,8 +9,20 @@ extension MYSyncEngine {
     
     /// Creates or updates a transaction for a given record that conforms to `MYRecordConvertible`.
     /// - Parameter record: The record that needs to be created or updated.
-    /// - Returns: A transaction, or `nil` when the record uses a CloudKit-reserved field key.
+    /// - Returns: A transaction, or `nil` when the record uses a CloudKit-reserved field key or an asset could not be staged.
     func getCreateUpdateTransaction(for record: any MYRecordConvertible) -> Transaction? {
+        Self.createUpdateTransaction(for: record, using: cache)
+    }
+
+    /// Builds a create/update transaction, staging any asset data in `cache`.
+    ///
+    /// Staging is all-or-nothing: if any asset fails to be written, the partially staged files are removed
+    /// and `nil` is returned, so a record is never uploaded without its asset.
+    static func createUpdateTransaction(
+        for record: any MYRecordConvertible,
+        using cache: Cache
+    ) -> Transaction? {
+        let logger = cache.logger
         let invalidKeys = CKRecord.reservedCustomFieldKeys(in: record.myProperties.keys)
         guard invalidKeys.isEmpty else {
             let message = CKRecord.reservedCustomFieldKeyMessage(
@@ -56,9 +68,13 @@ extension MYSyncEngine {
                             let url = try cache.saveAssetData(data, with: key, for: transaction)
                             properties.updateValue(.asset(url), forKey: key)
                         } catch {
-                            // If there is an error in saving the asset data, log the error
-                            logger.log("📁 Error in saving the asset data", error: error)
-                            interceptError(error)
+                            // Never queue a record without its asset; discard anything already staged
+                            logger.log(
+                                "📁 Error in saving the asset data, not queuing \(record.myRecordType) (\(record.myRecordID))",
+                                error: error
+                            )
+                            cache.removeCache(for: transaction)
+                            return nil
                         }
                     } else {
                         properties.updateValue(.asset(nil), forKey: key)
@@ -70,7 +86,6 @@ extension MYSyncEngine {
                             properties.updateValue(.codable(data), forKey: key)
                         } catch {
                             logger.log("🛑 Error in encoding Codable value", error: error)
-                            interceptError(error)
                         }
                     } else {
                         properties.updateValue(.codable(nil), forKey: key)
