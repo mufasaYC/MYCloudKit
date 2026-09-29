@@ -92,7 +92,10 @@ extension MYSyncEngine {
             if let ckError = error as? CKError,
                ckError.code == .changeTokenExpired {
                 userDefaults.setPreviousServerChangeToken(for: scope, nil)
+                // The recursive fetch completes the whole scope and persists a fresh token,
+                // so continuing here would redo the fetch and restore the expired token.
                 try await fetch(in: scope)
+                return
             } else {
                 throw error
             }
@@ -103,8 +106,11 @@ extension MYSyncEngine {
         try prepareForEncryptedDataReset(in: encryptedDataResetZoneIDs)
         
         // Step 2: Prepare the full list of zone IDs to fetch record changes from
+        // `newZoneIDs` also contains cached zones that have changes, so de-duplicate to avoid
+        // fetching the same zone twice and delivering its records to the delegate twice.
         let existingZoneIDs: [CKRecordZone.ID] = cache.getZoneIDs()
-        var allZoneIDs = existingZoneIDs + newZoneIDs
+        var seenZoneIDs = Set<CKRecordZone.ID>()
+        var allZoneIDs = (existingZoneIDs + newZoneIDs).filter { seenZoneIDs.insert($0).inserted }
         
         // Filter the zone IDs based on the current scope
         allZoneIDs = allZoneIDs.filter { zoneID in
@@ -448,9 +454,10 @@ extension MYSyncEngine {
             return true
         }
 
-        // Log how many zones were fetched and deleted.
+        // Log how many zones were added and deleted. `newZoneIDs` may include zones that are already cached.
+        let addedZoneCount = Set(newZoneIDs).subtracting(cache.getZoneIDs()).count
         self.logger.log(
-            "📦 Added \(newZoneIDs.count) new zones",
+            "📦 Added \(addedZoneCount) new zones",
             level: .debug
         )
         self.logger.log(
