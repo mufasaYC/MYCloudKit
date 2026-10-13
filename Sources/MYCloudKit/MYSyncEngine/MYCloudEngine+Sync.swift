@@ -96,16 +96,26 @@ extension MYSyncEngine {
         )
         var missingZoneIDs: [CKRecordZone.ID] = []
         
+        /// Once CloudKit reports an account-wide error or asks us to wait, send nothing else in this pass.
+        func shouldStopSyncing() -> Bool {
+            transactionsFailed.values.contains(where: SyncRetryPolicy.stopsSync)
+        }
         
         // MARK: Save & Delete Records
         if !recordsToSave.isEmpty || !recordsToDelete.isEmpty {
             do {
-                let modifyRecordsResult = try await database.modifyRecords(
+                let modifyRecordsResult = try await Self.modifyRecordsSplittingOnLimitExceeded(
                     saving: recordsToSave,
                     deleting: recordsToDelete,
-                    savePolicy: .allKeys,
-                    atomically: false
-                )
+                    logger: logger
+                ) { saving, deleting in
+                    try await database.modifyRecords(
+                        saving: saving,
+                        deleting: deleting,
+                        savePolicy: .allKeys,
+                        atomically: false
+                    )
+                }
                 
                 var successSavesCount: Int = .zero
                 var failureSavesCount: Int = .zero
@@ -219,7 +229,12 @@ extension MYSyncEngine {
         }
         
         // MARK: Save & Delete Zones
-        if !missingZoneIDs.isEmpty || !zonesToDelete.isEmpty {
+        if shouldStopSyncing() {
+            self.logger.log(
+                "⏸️ Skipping remaining CloudKit requests for '\(recordType)' until CloudKit allows syncing again",
+                level: .warning
+            )
+        } else if !missingZoneIDs.isEmpty || !zonesToDelete.isEmpty {
             /// making sure if there is a save and delete in the same request, respect the delete and mark the save as completed
             let zonesToDeleteSet = Set(zonesToDelete)
             missingZoneIDs.removeAll { zonesToDeleteSet.contains($0) }
@@ -294,6 +309,9 @@ extension MYSyncEngine {
         
         // MARK: Cascade Delete Records
         for recordID in recordsToCascadeDelete {
+            guard !shouldStopSyncing() else {
+                break
+            }
             guard let transaction = recordIDTransactionMap[recordID] else {
                 assertionFailure("How?")
                 continue
@@ -318,7 +336,8 @@ extension MYSyncEngine {
         transactionsCompleted.forEach { self.cache.removeCache(for: $0) }
 
         if !transactionsFailed.isEmpty {
-            throw transactionsFailed.first?.value ?? NSError(domain: "Something went wrong", code: 500)
+            throw SyncRetryPolicy.mostSignificantError(in: Array(transactionsFailed.values))
+                ?? NSError(domain: "Something went wrong", code: 500)
         }
         
         if !missingZoneTransactionsToBeRetried.isEmpty {

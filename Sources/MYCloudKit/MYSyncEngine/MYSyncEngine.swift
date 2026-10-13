@@ -85,6 +85,12 @@ public final class MYSyncEngine: ObservableObject {
     
     private var syncWorkItem: DispatchWorkItem? = nil
     
+    /// The single pending retry, scheduled from CloudKit's retry-after or our own backoff.
+    private var retryWorkItem: DispatchWorkItem? = nil
+    
+    /// Tracks when syncing may resume after a failed pass. Only accessed on the main actor.
+    var retryState = SyncRetryState()
+    
     /// Represents the state of a sync operation.
     public enum SyncState {
         case idle
@@ -128,6 +134,13 @@ public final class MYSyncEngine: ObservableObject {
     @Published public var fetchState: FetchState = .idle
     
     @Published public var cloudKitAccountStatus: CKAccountStatus = .available
+    
+    /// Set when CloudKit reports an account-wide error that retrying cannot fix, such as
+    /// `.quotaExceeded`, an iCloud account problem, or a misconfigured container.
+    ///
+    /// While this is set, edits stay queued but no sync is attempted. It is cleared, and syncing
+    /// resumes, when the app returns to the foreground or `beginSync()` is called.
+    @Published public private(set) var syncPausedError: CKError? = nil
     
     private var didAddForegroundNotificationObserver: Bool = false
 
@@ -244,18 +257,114 @@ public final class MYSyncEngine: ObservableObject {
         }
     }
     
+    /// Starts syncing the queue.
+    ///
+    /// Calling this resumes a sync paused by `syncPausedError` and skips any pending backoff,
+    /// but still waits for a retry-after requested by CloudKit.
     @MainActor
     public func beginSync() {
+        startSync(resumingPause: true)
+    }
+    
+    @MainActor
+    private func startSync(resumingPause: Bool) {
         addForegroundNotificationObserver()
+        if resumingPause {
+            retryState.resume()
+            publishSyncPausedError()
+        }
+        
         guard !syncState.isActive, !queue.isEmpty else {
             return
         }
+        
+        if retryState.pauseError != nil {
+            refreshStoppedQueueCount()
+            logger.log(
+                "⏸️ Sync is paused until the app returns to the foreground or beginSync() is called",
+                level: .debug
+            )
+            return
+        }
+        
+        if let nextSyncAllowedAt = retryState.nextSyncAllowedAt, nextSyncAllowedAt > .now {
+            refreshStoppedQueueCount()
+            scheduleRetry(at: nextSyncAllowedAt)
+            return
+        }
+        
+        cancelScheduledRetry()
         self.syncState = .syncing(queueCount: queue.count)
         Task { @MainActor [weak self] in
             guard let self else {
                 return
             }
-            self.syncState = await self.sync()
+            let state = await self.sync()
+            // Update the retry state before publishing, so observers of `syncState` see it consistently.
+            self.applyRetryPolicy(after: state)
+            self.syncState = state
+        }
+    }
+    
+    @MainActor
+    private func applyRetryPolicy(after state: SyncState) {
+        switch state {
+            case .completed:
+                retryState.recordSuccess()
+            case .stopped(_, let error?):
+                switch retryState.recordFailure(error) {
+                    case .paused:
+                        cancelScheduledRetry()
+                        logger.log(
+                            "⏸️ Pausing sync until the app returns to the foreground or beginSync() is called",
+                            level: .warning
+                        )
+                    case .retry(let date):
+                        scheduleRetry(at: date)
+                        logger.log(
+                            "⏳ Retrying sync in \(Int(date.timeIntervalSinceNow.rounded(.up)))s",
+                            level: .info
+                        )
+                    case .none:
+                        break
+                }
+            case .stopped, .idle, .syncing:
+                break
+        }
+        publishSyncPausedError()
+    }
+    
+    @MainActor
+    private func scheduleRetry(at date: Date) {
+        retryWorkItem?.cancel()
+        let delay = max(date.timeIntervalSinceNow, .zero)
+        let workItem: DispatchWorkItem = .init { [weak self] in
+            Task { @MainActor in
+                self?.startSync(resumingPause: false)
+            }
+        }
+        DispatchQueue.main.asyncAfter(wallDeadline: .now() + delay, execute: workItem)
+        self.retryWorkItem = workItem
+    }
+    
+    @MainActor
+    private func cancelScheduledRetry() {
+        retryWorkItem?.cancel()
+        retryWorkItem = nil
+    }
+    
+    @MainActor
+    private func publishSyncPausedError() {
+        if syncPausedError != retryState.pauseError {
+            syncPausedError = retryState.pauseError
+        }
+    }
+    
+    /// Keeps `queueCount` current while syncing is held back, as it was when every edit retried.
+    @MainActor
+    private func refreshStoppedQueueCount() {
+        if case .stopped(let queueCount, let error) = syncState, queueCount != queue.count {
+            syncState = .stopped(queueCount: queue.count, error: error)
         }
     }
     
@@ -273,7 +382,7 @@ public final class MYSyncEngine: ObservableObject {
         syncWorkItem?.cancel()
         let workItem: DispatchWorkItem = .init {
             Task { [weak self] in
-                await self?.beginSync()
+                await self?.startSync(resumingPause: false)
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(400), execute: workItem)

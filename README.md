@@ -211,6 +211,20 @@ func handleUnsyncableRecord(recordID: String, recordType: String, reason: String
 }
 ```
 
+The engine also takes care not to hammer CloudKit when syncing fails:
+
+- **Throttling:** when CloudKit returns a `retryAfterSeconds`, no sync is attempted before that time, whether it is triggered by an edit, `beginSync()` or a foreground. A single retry is scheduled for when it expires.
+- **Transient errors:** network and server errors without a hint are retried automatically with exponential backoff (2s, 4s, 8s, … up to about 5 minutes, with jitter). The backoff resets after a successful sync.
+- **Account-wide errors:** on `.quotaExceeded`, iCloud account errors or a misconfigured container, syncing pauses and `syncPausedError` is set. Edits stay queued, and syncing resumes when the app returns to the foreground or you call `beginSync()`, for example after the user frees up iCloud storage.
+- **Oversized requests:** a batch rejected with `.limitExceeded` is split into smaller requests instead of being retried unchanged.
+
+```swift
+syncEngine.$syncPausedError
+    .sink { error in
+        // e.g. show "iCloud storage is full" when error?.code == .quotaExceeded
+    }
+```
+
 8. Receiving Push Notifications
 
 To ensure your app stays in sync with remote changes (e.g., when another device modifies shared records), make sure to call `.fetch()` on the `MYSyncEngine` when your app receives a CloudKit push notification.
