@@ -190,11 +190,22 @@ extension MYSyncEngine.Cache {
 // MARK: - Encoded System Fields
 
 extension MYSyncEngine.Cache {
+    /// Characters a record name may contain that can't appear in a file name.
+    private static let fileNameAllowedCharacters = CharacterSet(charactersIn: "/:%").inverted
+
+    /// The cache file for a record's system fields. Record names may contain `/` (e.g. `challenge/day`),
+    /// which would otherwise point into a missing subdirectory, so the write failed and the record
+    /// was always saved without its change tag. Names without `/`, `:` or `%` keep their old file.
+    func encodedSystemFieldsURL(for recordName: String) -> URL {
+        let fileName = recordName.addingPercentEncoding(withAllowedCharacters: Self.fileNameAllowedCharacters) ?? recordName
+        return encodedSystemFieldsDirectoryURL
+            .appendingPathComponent(fileName)
+            .appendingPathExtension("bin")
+    }
+
     /// Stores the encoded system fields of a record (used for preserving CKRecord metadata).
     func saveEncodedSystemFields(data: Data, for recordName: String) {
-        let url = encodedSystemFieldsDirectoryURL
-            .appendingPathComponent(recordName)
-            .appendingPathExtension("bin")
+        let url = encodedSystemFieldsURL(for: recordName)
         do {
             try data.write(to: url)
         } catch {
@@ -204,10 +215,7 @@ extension MYSyncEngine.Cache {
 
     /// Retrieves previously saved system fields data for a record.
     func getEncodedSystemFields(for recordName: String) -> Data? {
-        let url = encodedSystemFieldsDirectoryURL
-            .appendingPathComponent(recordName)
-            .appendingPathExtension("bin")
-        return try? Data(contentsOf: url)
+        try? Data(contentsOf: encodedSystemFieldsURL(for: recordName))
     }
 
     /// Removes cached CloudKit system fields only for records in the specified zone.
