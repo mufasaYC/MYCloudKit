@@ -203,7 +203,7 @@ extension MYSyncEngine {
         }
         
         // Add the transaction to the queue and trigger the sync operation
-        self.queue.append(transaction)
+        self.mutateQueue { $0.append(transaction) }
         
         // Log the action of adding the transaction
         self.logger.log(
@@ -243,7 +243,7 @@ extension MYSyncEngine {
                 properties: [:]
             )
             
-            self.queue.append(transaction)
+            self.mutateQueue { $0.append(transaction) }
         } else {
             if shouldDeleteChildRecords {
                 // If the flag is true, delete child records as well
@@ -254,7 +254,7 @@ extension MYSyncEngine {
                     properties: [:]
                 )
                 
-                self.queue.append(transaction)
+                self.mutateQueue { $0.append(transaction) }
             }
             
             // Delete the record itself
@@ -265,7 +265,7 @@ extension MYSyncEngine {
                 properties: [:]
             )
             
-            self.queue.append(transaction)
+            self.mutateQueue { $0.append(transaction) }
         }
         
         // Log the action of adding the delete transaction

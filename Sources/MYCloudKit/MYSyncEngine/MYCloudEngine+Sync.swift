@@ -332,7 +332,8 @@ extension MYSyncEngine {
         transactionsFailed.forEach { transaction, error in
             self.handleError(error, for: transaction)
         }
-        self.queue = queue.filter { !completedTransactionIDs.contains($0.id) }
+        let completedIDs = Set(completedTransactionIDs)
+        self.mutateQueue { $0.removeAll { completedIDs.contains($0.id) } }
         transactionsCompleted.forEach { self.cache.removeCache(for: $0) }
 
         if !transactionsFailed.isEmpty {
@@ -447,24 +448,30 @@ extension MYSyncEngine {
         /// Removes the transaction from the queue and informs the delegate.
         /// If the error was due to missing references, re-enqueues those first.
         func removeTransactionFromQueue(silenty: Bool = false) {
-            if let index = queue.firstIndex(of: transaction) {
-                if !silenty,
-                   let recordsToSync = delegate?.handleUnsyncableRecord(
-                    recordID: transaction.record.recordName,
-                    recordType: transaction.record.recordType,
-                    reason: reason,
-                    error: error
-                   ) {
-                    let transactions = recordsToSync.compactMap { record in
-                        getCreateUpdateTransaction(for: record)
-                    }
+            guard queue.contains(transaction) else {
+                logger.log("🤔 Transaction not found in queue", level: .error)
+                return
+            }
+            // Ask the delegate outside the lock: it may enqueue records itself.
+            if !silenty,
+               let recordsToSync = delegate?.handleUnsyncableRecord(
+                recordID: transaction.record.recordName,
+                recordType: transaction.record.recordType,
+                reason: reason,
+                error: error
+               ) {
+                let transactions = recordsToSync.compactMap { record in
+                    getCreateUpdateTransaction(for: record)
+                }
+                mutateQueue { queue in
+                    let index = queue.firstIndex(of: transaction) ?? queue.endIndex
                     queue.insert(contentsOf: transactions, at: index)
-                } else {
-                    cache.removeCache(for: transaction)
-                    queue.remove(at: index)
                 }
             } else {
-                logger.log("🤔 Transaction not found in queue", level: .error)
+                cache.removeCache(for: transaction)
+                mutateQueue { queue in
+                    queue.removeAll { $0 == transaction }
+                }
             }
         }
         
@@ -605,14 +612,19 @@ extension MYSyncEngine {
                 break
                 
             case .retryWithError:
-                if let index = queue.firstIndex(of: transaction) {
-                    if queue[index].attempts >= maxRetryAttempts {
+                let hasAttemptsLeft: Bool? = mutateQueue { queue in
+                    guard let index = queue.firstIndex(of: transaction) else { return nil }
+                    guard queue[index].attempts < maxRetryAttempts else { return false }
+                    queue[index].attempts += 1
+                    return true
+                }
+                switch hasAttemptsLeft {
+                    case nil:
+                        logger.log("🤔 Transaction not found in queue", level: .error)
+                    case false?:
                         removeTransactionFromQueue()
-                    } else {
-                        queue[index].attempts += 1
-                    }
-                } else {
-                    logger.log("🤔 Transaction not found in queue", level: .error)
+                    case true?:
+                        break
                 }
                 
             case .dontSyncThis:
