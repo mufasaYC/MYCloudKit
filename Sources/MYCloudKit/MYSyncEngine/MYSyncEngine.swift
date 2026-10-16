@@ -145,10 +145,19 @@ public final class MYSyncEngine: ObservableObject {
     private var didAddForegroundNotificationObserver: Bool = false
 
     /// Queue of pending transactions to be synced.
+    private let transactionQueue: TransactionQueue
+    
+    /// A snapshot of the pending transactions. Use `mutateQueue(_:)` to change them.
     var queue: [Transaction] {
-        didSet {
-            cache.cacheTransactionQueue(queue)
-        }
+        transactionQueue.snapshot
+    }
+    
+    /// Changes the queue atomically and persists it once.
+    ///
+    /// - Important: Never call the delegate or anything that may queue records from `body`; the lock is not reentrant.
+    @discardableResult
+    func mutateQueue<T>(_ body: (inout [Transaction]) -> T) -> T {
+        transactionQueue.mutate(body)
     }
     
     /// Optional delegate to receive sync lifecycle callbacks.
@@ -181,11 +190,12 @@ public final class MYSyncEngine: ObservableObject {
         let logger = Logger(currentLevel: logLevel)
         let syncCache: Cache = .init(suiteName: userDefaultsSuiteName, logger: logger)
         self.cache = syncCache
-        self.queue = syncCache.retrieveTransactionQueue()
+        let transactionQueue = TransactionQueue(cache: syncCache)
+        self.transactionQueue = transactionQueue
         self.logger = logger
 
         // Reclaim staged assets left behind by transactions that already finished.
-        let queuedTransactionIDs = Set(queue.map(\.id))
+        let queuedTransactionIDs = Set(transactionQueue.snapshot.map(\.id))
         DispatchQueue.global(qos: .utility).async {
             syncCache.removeOrphanedTransactionFolders(keeping: queuedTransactionIDs)
         }

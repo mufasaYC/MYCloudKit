@@ -190,26 +190,37 @@ extension MYSyncEngine {
     /// - Parameter record: The record to be synchronized.
     /// - Note: Make sure the `myRecordType` is defined in the `syncableRecordTypesInDependencyOrder()`
     public func sync(_ record: any MYRecordConvertible) {
-        if let delegate {
-            assert(
-                delegate.syncableRecordTypesInDependencyOrder().contains(record.myRecordType),
-                "\(record.myRecordType) is not mentioned in MYSyncDelegate's `syncableRecordTypesInDependencyOrder()`"
-            )
+        sync([record])
+    }
+    
+    /// Syncs the given records, in order.
+    ///
+    /// Prefer this over calling `sync(_:)` in a loop when queuing many records (e.g. re-uploading a whole group):
+    /// the queue is persisted once instead of once per record.
+    /// - Parameter records: The records to be synchronized, parents and referenced records first.
+    /// - Note: Make sure each `myRecordType` is defined in the `syncableRecordTypesInDependencyOrder()`
+    public func sync(_ records: [any MYRecordConvertible]) {
+        guard !records.isEmpty else {
+            return
         }
+        assertSyncable(records)
         
-        // Get the transaction for creating or updating the record
-        guard let transaction = getCreateUpdateTransaction(for: record) else {
+        // Get the transactions for creating or updating the records
+        let transactions = records.compactMap { getCreateUpdateTransaction(for: $0) }
+        guard !transactions.isEmpty else {
             return
         }
         
-        // Add the transaction to the queue and trigger the sync operation
-        self.queue.append(transaction)
+        // Add the transactions to the queue and trigger the sync operation
+        mutateQueue { $0.append(contentsOf: transactions) }
         
-        // Log the action of adding the transaction
-        self.logger.log(
-            "🌀 Queued sync for \(record.myRecordType) (\(record.myRecordID))",
-            level: .debug
-        )
+        // Log the action of adding the transactions
+        for record in records {
+            self.logger.log(
+                "🌀 Queued sync for \(record.myRecordType) (\(record.myRecordID))",
+                level: .debug
+            )
+        }
         
         self.queueUpdated()
     }
@@ -220,13 +231,71 @@ extension MYSyncEngine {
     ///   - shouldDeleteChildRecords: A flag indicating whether child records of the given record should also be deleted. Defaults to `false`.
     ///   Set it to `true` if you this record is the `myParentID` for other records and you want them to all be cascade deleted.
     public func delete(_ record: any MYRecordConvertible, shouldDeleteChildRecords: Bool = false) {
-        if let delegate {
-            assert(
-                delegate.syncableRecordTypesInDependencyOrder().contains(record.myRecordType),
-                "\(record.myRecordType) is not mentioned in MYSyncDelegate's `syncableRecordTypesInDependencyOrder()`"
+        delete([record], shouldDeleteChildRecords: shouldDeleteChildRecords)
+    }
+    
+    /// Deletes the given records, in order, and optionally deletes their child records.
+    ///
+    /// The queue is persisted once instead of once per record.
+    /// - Parameters:
+    ///   - records: The records to be deleted.
+    ///   - shouldDeleteChildRecords: Whether child records of each record should also be deleted. Defaults to `false`.
+    public func delete(_ records: [any MYRecordConvertible], shouldDeleteChildRecords: Bool = false) {
+        guard !records.isEmpty else {
+            return
+        }
+        assertSyncable(records)
+        
+        let transactions = records.flatMap { record in
+            Self.deleteTransactions(for: record, shouldDeleteChildRecords: shouldDeleteChildRecords)
+        }
+        mutateQueue { $0.append(contentsOf: transactions) }
+        
+        // Log the action of adding the delete transactions
+        for record in records {
+            self.logger.log(
+                "🗑️ Queued delete for \(record.myRecordType) (\(record.myRecordID))",
+                level: .debug
             )
         }
         
+        self.queueUpdated()
+    }
+    
+    /// Removes changes that are queued but not yet sent to CloudKit.
+    ///
+    /// Use this before deleting the user's data, so edits queued earlier don't upload afterwards.
+    /// A sync pass already in flight may still send the changes it picked up.
+    /// - Parameter groupIDs: Only discard changes whose `myRootGroupID` is one of these. Pass `nil` to discard every queued change.
+    public func discardQueuedChanges(inGroupIDs groupIDs: [String]? = nil) {
+        let groupIDs = groupIDs.map(Set.init)
+        let discarded: [Transaction] = mutateQueue { queue in
+            let discarded = queue.filter { Self.transaction($0, isIn: groupIDs) }
+            queue.removeAll { Self.transaction($0, isIn: groupIDs) }
+            return discarded
+        }
+        discarded.forEach { cache.removeCache(for: $0) }
+        
+        self.logger.log(
+            "🗑️ Discarded \(discarded.count) queued changes",
+            level: .debug
+        )
+    }
+    
+    static func transaction(_ transaction: Transaction, isIn groupIDs: Set<String>?) -> Bool {
+        guard let groupIDs else {
+            return true
+        }
+        guard let zoneName = transaction.record.zoneName else {
+            return false
+        }
+        return groupIDs.contains(zoneName)
+    }
+    
+    static func deleteTransactions(
+        for record: any MYRecordConvertible,
+        shouldDeleteChildRecords: Bool
+    ) -> [Transaction] {
         let transactionRecord: Transaction.Record = .init(
             recordName: record.myRecordID,
             recordType: record.myRecordType,
@@ -234,46 +303,34 @@ extension MYSyncEngine {
             parentRecordName: record.myParentID
         )
         
-        if record.myRecordID == record.myRootGroupID {
-            // If the record to be deleted is the root group, delete the zone
-            let transaction: Transaction = .init(
+        func transaction(_ operationType: Transaction.OperationType) -> Transaction {
+            .init(
                 id: .init(),
-                operationType: .deleteZone,
+                operationType: operationType,
                 record: transactionRecord,
                 properties: [:]
             )
-            
-            self.queue.append(transaction)
-        } else {
-            if shouldDeleteChildRecords {
-                // If the flag is true, delete child records as well
-                let transaction: Transaction = .init(
-                    id: .init(),
-                    operationType: .deleteChildRecords,
-                    record: transactionRecord,
-                    properties: [:]
-                )
-                
-                self.queue.append(transaction)
-            }
-            
-            // Delete the record itself
-            let transaction: Transaction = .init(
-                id: .init(),
-                operationType: .deleteRecord,
-                record: transactionRecord,
-                properties: [:]
-            )
-            
-            self.queue.append(transaction)
         }
         
-        // Log the action of adding the delete transaction
-        self.logger.log(
-            "🗑️ Queued delete for \(record.myRecordType) (\(record.myRecordID))",
-            level: .debug
-        )
+        if record.myRecordID == record.myRootGroupID {
+            // If the record to be deleted is the root group, delete the zone
+            return [transaction(.deleteZone)]
+        }
         
-        self.queueUpdated()
+        // If the flag is true, delete child records as well, then the record itself
+        return (shouldDeleteChildRecords ? [transaction(.deleteChildRecords)] : []) + [transaction(.deleteRecord)]
+    }
+    
+    private func assertSyncable(_ records: [any MYRecordConvertible]) {
+        guard let delegate else {
+            return
+        }
+        let recordTypes = delegate.syncableRecordTypesInDependencyOrder()
+        for record in records {
+            assert(
+                recordTypes.contains(record.myRecordType),
+                "\(record.myRecordType) is not mentioned in MYSyncDelegate's `syncableRecordTypesInDependencyOrder()`"
+            )
+        }
     }
 }

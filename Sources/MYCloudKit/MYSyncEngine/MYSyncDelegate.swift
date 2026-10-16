@@ -73,7 +73,13 @@ public protocol MYSyncDelegate: AnyObject {
     
     /// Called when entire record groups need to be removed (e.g. shared zones or logical groupings, this is basically anything that could have been the `rootGroupID`).
     ///
+    /// The app decides what happens to its local data. To keep it in iCloud, queue the groups' records
+    /// through `MYSyncEngine.sync(_:)`: MYCloudKit re-creates the zones and uploads them as new records.
+    /// A zone deleted and re-created since the last fetch is reported here first, and its current
+    /// contents follow in `didReceiveRecordsToSave(_:)`.
+    ///
     /// - Parameter ids: An array of group identifiers that should be deleted from the local store.
+    /// - Returns: `true` once the change is applied locally. Returning `false` stops this fetch, and the deletion is reported again next time.
     func didReceiveGroupIDsToDelete(_ ids: [String]) async -> Bool
 
     /// Called when CloudKit deletes zones because the user reset their encrypted iCloud data.

@@ -98,6 +98,12 @@ let task = Task(id: "task123", title: "Finish homework", isDone: false)
 syncEngine.sync(task)
 ```
 
+To queue many records at once (for example, re-uploading a whole group), pass an array. The records are queued in order and the queue is saved once:
+
+```swift
+syncEngine.sync([project] + project.tasks)
+```
+
 > It is your responsibility to sync data sensibly. Don't sync a newly created Task first and then the Project it belongs to (provided it has never been synced) which is conceptually incorrect. A new Project should be synced first and then the newly created Task. This is to ensure that Project that the Task to reference in CloudKit is already present before it (either in the queue or in CloudKit itself).
 > Currently the logic is that the last write wins, in a future commit we will allow you to resolve the conflict via the `MYSyncDelegate`.
 
@@ -109,6 +115,14 @@ Example of deleting a Task:
 
 ```swift
 syncEngine.delete(task)
+```
+
+`delete(_:)` also takes an array of records.
+
+To drop changes that are queued but not yet uploaded, for example right before deleting all of the user's data, call `discardQueuedChanges(inGroupIDs:)`. Pass `nil` to drop everything:
+
+```swift
+syncEngine.discardQueuedChanges()
 ```
 
 > By default CloudKit doesn't cascade delete all records that may reference a task. If you want this, we have exposed a parameter `shouldDeleteChildRecords` which defaults to `false`. You can set this to `true`, if you desire that behaviour.
@@ -165,6 +179,17 @@ You’ll implement methods to:
 - Remove entire record groups (zones)
 - Recover from sync failures by correcting broken records
 - Provide the list of record types your app uses (in order of dependency)
+
+### When a Group's Zone Is Deleted
+
+When a zone is deleted in CloudKit (for example the user deleted the app's data in iCloud Settings), you get `didReceiveGroupIDsToDelete(_:)`. You decide what happens to the local data. Delete it to match iCloud, or keep it and queue the group's records with `sync(_:)`. MYCloudKit re-creates the zone and uploads them as new records:
+
+```swift
+func didReceiveGroupIDsToDelete(_ ids: [String]) async -> Bool {
+    syncEngine.sync(await store.records(inGroups: ids))
+    return true
+}
+```
 
 ### Record Type Order Matters
 
