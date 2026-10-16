@@ -51,7 +51,7 @@ extension MYSyncEngine {
     ///   and then fetches record-level changes within those zones.
     /// - It updates local caches, collects changed and deleted records, and stores updated change tokens.
     /// - A zone whose change token expired is re-fetched from the start in the same pass.
-    /// - A zone that no longer exists is forwarded to the delegate as deleted instead of failing the fetch.
+    /// - A cached zone that no longer exists is dropped from the caches instead of failing the fetch.
     ///
     /// - Parameter scope: The `CKDatabase.Scope` to fetch changes from (e.g., `.private` or `.shared`).
     /// - Throws: Rethrows errors encountered during the fetch process.
@@ -128,11 +128,18 @@ extension MYSyncEngine {
             zoneChanges.replaceResults(for: Set(expiredZoneIDs), with: retriedChanges)
         }
         
-        // Zones that no longer exist are deletions, not failures
+        // Zones that no longer exist are dropped from the caches instead of failing the fetch.
+        // They are not reported to the delegate: only CloudKit's own deletion list is trusted for that,
+        // since a cached zone can also be missing for other reasons (e.g. a different iCloud account).
         let missingZoneIDs = zoneChanges.missingZoneIDs.filter { !deletedZoneIDs.contains($0) }
-        discardMetadata(forDeletedZones: missingZoneIDs)
+        if !missingZoneIDs.isEmpty {
+            self.logger.log(
+                "⚠️ \(missingZoneIDs.count) cached zone(s) no longer exist; removing them from the cache",
+                level: .warning
+            )
+            discardMetadata(forDeletedZones: missingZoneIDs)
+        }
         newZoneIDs.removeAll { zoneChanges.missingZoneIDs.contains($0) }
-        deletedZoneIDs.append(contentsOf: missingZoneIDs)
         
         if let error = zoneChanges.errors.first ?? zoneChanges.expiredZoneErrors.values.first {
             throw error
