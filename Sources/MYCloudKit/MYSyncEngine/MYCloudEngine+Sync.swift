@@ -148,9 +148,11 @@ extension MYSyncEngine {
                                         )
                                         if !missingZoneIDs.contains(recordID.zoneID) {
                                             missingZoneIDs.append(recordID.zoneID)
-                                            if recordID.zoneID.ownerName == CKCurrentUserDefaultName {
-                                                // The zone is re-created empty: its old change token would make the next
-                                                // fetch fail with `changeTokenExpired`. It stays in the zone cache.
+                                            // A zone with a change token existed before and is re-created empty: its old
+                                            // token would make the next fetch fail with `changeTokenExpired`. A brand-new
+                                            // zone has nothing to clear, so skip scanning the system fields cache.
+                                            if recordID.zoneID.ownerName == CKCurrentUserDefaultName,
+                                               self.userDefaults.getServerChangeToken(for: recordID.zoneID) != nil {
                                                 self.discardChangeTracking(forZones: [recordID.zoneID])
                                             }
                                         }
