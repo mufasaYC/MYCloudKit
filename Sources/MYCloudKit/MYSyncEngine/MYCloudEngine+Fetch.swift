@@ -50,7 +50,8 @@ extension MYSyncEngine {
     /// - This method checks for changes at the database level first (zones added or deleted),
     ///   and then fetches record-level changes within those zones.
     /// - It updates local caches, collects changed and deleted records, and stores updated change tokens.
-    /// - Errors such as `CKError.changeTokenExpired` are handled gracefully by resetting the token.
+    /// - A zone whose change token expired is re-fetched from the start in the same pass.
+    /// - A zone that no longer exists is forwarded to the delegate as deleted instead of failing the fetch.
     ///
     /// - Parameter scope: The `CKDatabase.Scope` to fetch changes from (e.g., `.private` or `.shared`).
     /// - Throws: Rethrows errors encountered during the fetch process.
@@ -63,10 +64,6 @@ extension MYSyncEngine {
         var newZoneIDs: [CKRecordZone.ID] = []
         var deletedZoneIDs: [CKRecordZone.ID] = []
         var encryptedDataResetZoneIDs: [CKRecordZone.ID] = []
-        
-        // Temporary storage for records to save and delete
-        var recordsToSave: [CKRecord] = []
-        var recordIDsToDelete: [(record: CKRecord.ID, recordType: CKRecord.RecordType)] = []
         
         self.logger.log(
             "Starting fetch in \(scope.name) scope",
@@ -105,15 +102,84 @@ extension MYSyncEngine {
         // and discard only stale CloudKit metadata for the reset zones.
         try prepareForEncryptedDataReset(in: encryptedDataResetZoneIDs)
         
-        // Step 2: Prepare the full list of zone IDs to fetch record changes from
-        // `newZoneIDs` also contains cached zones that have changes, so de-duplicate to avoid
-        // fetching the same zone twice and delivering its records to the delegate twice.
-        let existingZoneIDs: [CKRecordZone.ID] = cache.getZoneIDs()
-        var seenZoneIDs = Set<CKRecordZone.ID>()
-        var allZoneIDs = (existingZoneIDs + newZoneIDs).filter { seenZoneIDs.insert($0).inserted }
+        // A deleted zone's change token and system fields are stale, even if the zone has been re-created since
+        // (e.g. by an upload that ran before this fetch). A re-created zone is then fetched from the start.
+        discardMetadata(forDeletedZones: deletedZoneIDs)
         
-        // Filter the zone IDs based on the current scope
-        allZoneIDs = allZoneIDs.filter { zoneID in
+        // Step 2: Prepare the full list of zone IDs to fetch record changes from
+        let allZoneIDs = Self.zoneIDsToFetch(
+            cached: cache.getZoneIDs(),
+            modified: newZoneIDs,
+            deleted: deletedZoneIDs,
+            in: scope
+        )
+        
+        // Step 3: Fetch record-level changes within the zones
+        var zoneChanges = await fetchZoneChanges(in: allZoneIDs, database: database)
+        
+        // Step 4: Re-fetch zones whose token expired (their tokens are reset) from the start
+        if !zoneChanges.expiredZoneErrors.isEmpty {
+            let expiredZoneIDs = Array(zoneChanges.expiredZoneErrors.keys)
+            self.logger.log(
+                "🔄 Change token expired for \(expiredZoneIDs.count) zone(s), fetching them from the start",
+                level: .info
+            )
+            let retriedChanges = await fetchZoneChanges(in: expiredZoneIDs, database: database)
+            zoneChanges.replaceResults(for: Set(expiredZoneIDs), with: retriedChanges)
+        }
+        
+        // Zones that no longer exist are deletions, not failures
+        let missingZoneIDs = zoneChanges.missingZoneIDs.filter { !deletedZoneIDs.contains($0) }
+        discardMetadata(forDeletedZones: missingZoneIDs)
+        newZoneIDs.removeAll { zoneChanges.missingZoneIDs.contains($0) }
+        deletedZoneIDs.append(contentsOf: missingZoneIDs)
+        
+        if let error = zoneChanges.errors.first ?? zoneChanges.expiredZoneErrors.values.first {
+            throw error
+        }
+        
+        // Step 5: Apply the changes to local storage.
+        // Zone deletions go first: a zone deleted and then re-created must end up with its new contents.
+        guard await self.groupsToDelete(deletedZoneIDs) else {
+            return
+        }
+        guard await self.recordsToSave(zoneChanges.recordsToSave) else {
+            return
+        }
+        guard await self.recordsToDelete(zoneChanges.recordIDsToDelete) else {
+            return
+        }
+        updateZoneIDsCache(newZoneIDs: newZoneIDs, deletedZoneIDs: deletedZoneIDs)
+        
+        // Step 6: Persist the new tokens for next sync
+        userDefaults.setPreviousServerChangeToken(for: scope, databaseChangeToken)
+        zoneChanges.serverChangeTokens.forEach { zoneID, token in
+            self.userDefaults.setServerChangeToken(token, for: zoneID)
+        }
+        
+        self.logger.log(
+            "✅ Finished fetch in \(scope.name) scope",
+            level: .debug
+        )
+    }
+    
+    /// The zones whose record changes a fetch asks for.
+    ///
+    /// `modified` also contains cached zones that have changes, so the list is de-duplicated to avoid
+    /// fetching the same zone twice and delivering its records to the delegate twice.
+    /// Zones reported deleted are skipped unless they were also reported modified, i.e. re-created.
+    static func zoneIDsToFetch(
+        cached: [CKRecordZone.ID],
+        modified: [CKRecordZone.ID],
+        deleted: [CKRecordZone.ID],
+        in scope: CKDatabase.Scope
+    ) -> [CKRecordZone.ID] {
+        let deletedZoneIDs = Set(deleted).subtracting(modified)
+        var seenZoneIDs = Set<CKRecordZone.ID>()
+        return (cached + modified).filter { zoneID in
+            guard !deletedZoneIDs.contains(zoneID), seenZoneIDs.insert(zoneID).inserted else {
+                return false
+            }
             switch scope {
                 case .private:
                     return zoneID.ownerName == CKCurrentUserDefaultName
@@ -123,24 +189,60 @@ extension MYSyncEngine {
                     return false // Skip public database
             }
         }
+    }
+    
+    /// The outcome of one `CKFetchRecordZoneChangesOperation`.
+    struct ZoneChanges {
+        var recordsToSave: [CKRecord] = []
+        var recordIDsToDelete: [(record: CKRecord.ID, recordType: CKRecord.RecordType)] = []
+        var serverChangeTokens: [CKRecordZone.ID: CKServerChangeToken] = [:]
+        /// Zones whose change token expired; their tokens have been reset.
+        var expiredZoneErrors: [CKRecordZone.ID: Error] = [:]
+        /// Zones that no longer exist on the server.
+        var missingZoneIDs: [CKRecordZone.ID] = []
+        /// Any other failure, which fails the fetch.
+        var errors: [Error] = []
         
-        // Step 3: Prepare zone configurations for token-based incremental fetch
+        /// Replaces everything fetched for `zoneIDs` with `retry`, a fetch of only those zones.
+        mutating func replaceResults(for zoneIDs: Set<CKRecordZone.ID>, with retry: ZoneChanges) {
+            recordsToSave.removeAll { zoneIDs.contains($0.recordID.zoneID) }
+            recordIDsToDelete.removeAll { zoneIDs.contains($0.record.zoneID) }
+            zoneIDs.forEach { serverChangeTokens[$0] = nil }
+            expiredZoneErrors = expiredZoneErrors.filter { !zoneIDs.contains($0.key) }
+            
+            recordsToSave.append(contentsOf: retry.recordsToSave)
+            recordIDsToDelete.append(contentsOf: retry.recordIDsToDelete)
+            serverChangeTokens.merge(retry.serverChangeTokens) { _, new in new }
+            expiredZoneErrors.merge(retry.expiredZoneErrors) { _, new in new }
+            missingZoneIDs.append(contentsOf: retry.missingZoneIDs.filter { !missingZoneIDs.contains($0) })
+            errors.append(contentsOf: retry.errors)
+        }
+    }
+    
+    /// Fetches record-level changes in `zoneIDs`, starting from each zone's saved change token.
+    private func fetchZoneChanges(
+        in zoneIDs: [CKRecordZone.ID],
+        database: CKDatabase
+    ) async -> ZoneChanges {
+        guard !zoneIDs.isEmpty else {
+            return .init()
+        }
+        
+        // Prepare zone configurations for token-based incremental fetch
         typealias ZoneConfig = CKFetchRecordZoneChangesOperation.ZoneConfiguration
         var configurationsByRecordZoneID: [CKRecordZone.ID : ZoneConfig] = [:]
         
-        allZoneIDs.forEach { zoneID in
+        zoneIDs.forEach { zoneID in
             configurationsByRecordZoneID[zoneID] = .init(
                 previousServerChangeToken: userDefaults.getServerChangeToken(for: zoneID)
             )
         }
         
-        var newZoneServerChangeToken: [CKRecordZone.ID: CKServerChangeToken] = [:]
-        var fetchErrors: [Error] = []
+        var changes = ZoneChanges()
         
-        // Step 4: Fetch record-level changes within the zones
         await withCheckedContinuation { continuation in
             let operation = CKFetchRecordZoneChangesOperation(
-                recordZoneIDs: allZoneIDs,
+                recordZoneIDs: zoneIDs,
                 configurationsByRecordZoneID: configurationsByRecordZoneID
             )
             
@@ -157,22 +259,23 @@ extension MYSyncEngine {
                                 level: .warning
                             )
                         }
-                        newZoneServerChangeToken[zoneID] = serverChangeToken
+                        changes.serverChangeTokens[zoneID] = serverChangeToken
                     case .failure(let error):
-                        if let ckError = error as? CKError {
-                            if ckError.code == .changeTokenExpired {
-                                // Reset token if expired
-                                self?.userDefaults.setServerChangeToken(nil, for: zoneID)
-                            } else if ckError.code == .zoneNotFound || ckError.code == .userDeletedZone {
-                                self?.cache.deleteZoneID(zoneID)
-                            }
-                        }
                         self?.logger.log(
                             "⚠️ Failed to fetch changes for zone '\(zoneID.zoneName)'",
                             level: .warning,
                             error: error
                         )
-                        fetchErrors.append(error)
+                        switch (error as? CKError)?.code {
+                            case .changeTokenExpired:
+                                // Reset token if expired
+                                self?.userDefaults.setServerChangeToken(nil, for: zoneID)
+                                changes.expiredZoneErrors[zoneID] = error
+                            case .zoneNotFound, .userDeletedZone:
+                                changes.missingZoneIDs.append(zoneID)
+                            default:
+                                changes.errors.append(error)
+                        }
                 }
             }
             
@@ -180,20 +283,20 @@ extension MYSyncEngine {
             operation.recordWasChangedBlock = { [weak self] recordID, result in
                 switch result {
                     case .success(let record):
-                        recordsToSave.append(record)
+                        changes.recordsToSave.append(record)
                     case .failure(let error):
                         self?.logger.log(
                             "⚠️ Error processing changed record '\(recordID.recordName)'",
                             level: .warning,
                             error: error
                         )
-                        fetchErrors.append(error)
+                        changes.errors.append(error)
                 }
             }
             
             // Called for each deleted record
             operation.recordWithIDWasDeletedBlock = { recordID, recordType in
-                recordIDsToDelete.append((recordID, recordType))
+                changes.recordIDsToDelete.append((recordID, recordType))
             }
             
             // Called when change tokens are incrementally updated mid-fetch
@@ -202,7 +305,7 @@ extension MYSyncEngine {
                 token,
                 _ in
                 if let token {
-                    newZoneServerChangeToken[zoneID] = token
+                    changes.serverChangeTokens[zoneID] = token
                 } else {
                     self?.logger.log(
                         "⚠️ Missing token update for zone '\(zoneID.zoneName)'",
@@ -219,31 +322,7 @@ extension MYSyncEngine {
             database.add(operation)
         }
         
-        if let error = fetchErrors.first {
-            throw error
-        }
-        
-        // Step 5: Apply the changes to local storage
-        guard await self.recordsToSave(recordsToSave) else {
-            return
-        }
-        guard await self.recordsToDelete(recordIDsToDelete) else {
-            return
-        }
-        guard await self.updateZoneIDsCache(newZoneIDs: newZoneIDs, deletedZoneIDs: deletedZoneIDs) else {
-            return
-        }
-        
-        // Step 6: Persist the new tokens for next sync
-        userDefaults.setPreviousServerChangeToken(for: scope, databaseChangeToken)
-        newZoneServerChangeToken.forEach { zoneID, token in
-            self.userDefaults.setServerChangeToken(token, for: zoneID)
-        }
-        
-        self.logger.log(
-            "✅ Finished fetch in \(scope.name) scope",
-            level: .debug
-        )
+        return changes
     }
 
     private func databaseChanges(
@@ -295,6 +374,34 @@ extension MYSyncEngine {
             database.add(operation)
         }
     }
+    
+    /// Forgets everything cached for zones that no longer exist on the server: their change tokens,
+    /// their place in the zone cache and, for the user's own zones, their records' system fields.
+    /// Local app data is untouched.
+    func discardMetadata(forDeletedZones zoneIDs: [CKRecordZone.ID]) {
+        Self.discardMetadata(forDeletedZones: zoneIDs, userDefaults: userDefaults, cache: cache)
+    }
+    
+    static func discardMetadata(forDeletedZones zoneIDs: [CKRecordZone.ID], userDefaults: UserDefaults, cache: Cache) {
+        guard !zoneIDs.isEmpty else {
+            return
+        }
+        cache.deleteZoneIDs(Set(zoneIDs))
+        discardChangeTracking(forZones: zoneIDs, userDefaults: userDefaults, cache: cache)
+    }
+    
+    /// Clears the change tokens and system fields of zones that are, or are about to be, re-created empty.
+    ///
+    /// A shared zone's system fields are kept: they are what routes its records to the shared database,
+    /// and only its owner can re-create it.
+    func discardChangeTracking(forZones zoneIDs: [CKRecordZone.ID]) {
+        Self.discardChangeTracking(forZones: zoneIDs, userDefaults: userDefaults, cache: cache)
+    }
+    
+    static func discardChangeTracking(forZones zoneIDs: [CKRecordZone.ID], userDefaults: UserDefaults, cache: Cache) {
+        zoneIDs.forEach { userDefaults.setServerChangeToken(nil, for: $0) }
+        cache.deleteEncodedSystemFields(in: Set(zoneIDs.filter { $0.ownerName == CKCurrentUserDefaultName }))
+    }
 
     private func prepareForEncryptedDataReset(in zoneIDs: [CKRecordZone.ID]) throws {
         guard !zoneIDs.isEmpty else {
@@ -304,10 +411,8 @@ extension MYSyncEngine {
         let uniqueZoneIDs = Array(Set(zoneIDs))
         try cache.addPendingZoneResyncIDs(uniqueZoneIDs)
 
+        discardMetadata(forDeletedZones: uniqueZoneIDs)
         for zoneID in uniqueZoneIDs {
-            userDefaults.setServerChangeToken(nil, for: zoneID)
-            cache.deleteZoneID(zoneID)
-            cache.deleteEncodedSystemFields(in: zoneID)
             logger.log(
                 "🔐 Encrypted data reset detected for zone '\(zoneID.zoneName)'; local data will be preserved and requested for resync",
                 level: .warning
@@ -439,51 +544,73 @@ extension MYSyncEngine {
     }
     
     
-    /// Updates the local cache of CloudKit zone IDs based on newly fetched and deleted zones.
-    ///
-    /// This function performs the following:
-    /// 1. Logs how many zones were fetched and deleted.
-    /// 2. Notifies the delegate of zone deletions (typically used to remove groups tied to those zones).
-    /// 3. Updates the cached list of zone IDs by adding new ones and removing deleted ones.
-    ///
-    /// - Parameters:
-    ///   - newZoneIDs: An array of `CKRecordZone.ID` objects representing newly fetched zones.
-    ///   - deletedZoneIDs: An array of `CKRecordZone.ID` objects representing zones that have been deleted.
-    func updateZoneIDsCache(newZoneIDs: [CKRecordZone.ID], deletedZoneIDs: [CKRecordZone.ID]) async -> Bool {
-        guard !newZoneIDs.isEmpty || !deletedZoneIDs.isEmpty else {
+    /// Tells the delegate which groups to delete, using the zone names.
+    func groupsToDelete(_ deletedZoneIDs: [CKRecordZone.ID]) async -> Bool {
+        let groupIDs = Self.deletedGroupIDs(deletedZoneIDs)
+        guard !groupIDs.isEmpty else {
             return true
         }
-
-        // Log how many zones were added and deleted. `newZoneIDs` may include zones that are already cached.
-        let addedZoneCount = Set(newZoneIDs).subtracting(cache.getZoneIDs()).count
+        
+        self.logger.log(
+            "🗑️ Removed \(groupIDs.count) zones",
+            level: .debug
+        )
+        
+        guard let didSave = await self.delegate?.didReceiveGroupIDsToDelete(groupIDs), didSave else {
+            return false
+        }
+        return true
+    }
+    
+    /// The group IDs (zone names) of `deletedZoneIDs`, without duplicates, in the order reported.
+    static func deletedGroupIDs(_ deletedZoneIDs: [CKRecordZone.ID]) -> [String] {
+        var seenZoneIDs = Set<CKRecordZone.ID>()
+        return deletedZoneIDs
+            .filter { seenZoneIDs.insert($0).inserted }
+            .map(\.zoneName)
+    }
+    
+    /// Updates the local cache of CloudKit zone IDs based on newly fetched and deleted zones.
+    ///
+    /// - Parameters:
+    ///   - newZoneIDs: Zones reported as changed, which may already be cached.
+    ///   - deletedZoneIDs: Zones reported as deleted. A zone also in `newZoneIDs` was re-created and stays cached.
+    func updateZoneIDsCache(newZoneIDs: [CKRecordZone.ID], deletedZoneIDs: [CKRecordZone.ID]) {
+        guard !newZoneIDs.isEmpty || !deletedZoneIDs.isEmpty else {
+            return
+        }
+        
+        let existingZoneIDs = cache.getZoneIDs()
+        
+        // Log how many zones were added. `newZoneIDs` may include zones that are already cached.
+        let addedZoneCount = Set(newZoneIDs).subtracting(existingZoneIDs).count
         self.logger.log(
             "📦 Added \(addedZoneCount) new zones",
             level: .debug
         )
-        self.logger.log(
-            "🗑️ Removed \(deletedZoneIDs.count) zones",
-            level: .debug
-        )
-
-        // Inform the delegate about group IDs to delete, using the zone names.
-        let deletedGroupIDs = deletedZoneIDs.map { $0.zoneName }
-        guard let didSave = await self.delegate?.didReceiveGroupIDsToDelete(deletedGroupIDs), didSave else {
-            return false
-        }
-
-        // Retrieve and update the locally cached zone IDs.
-        var existingZoneIDs = cache.getZoneIDs()
-        existingZoneIDs.append(contentsOf: newZoneIDs)
-
-        // Remove any zone IDs that are now deleted.
-        existingZoneIDs = existingZoneIDs.filter { !deletedZoneIDs.contains($0) }
         
-        // Avoid duplication
-        existingZoneIDs = Array(Set(existingZoneIDs))
-
         // Save the updated zone list back into cache.
-        self.cache.setZoneIDs(existingZoneIDs)
-        return true
+        self.cache.setZoneIDs(
+            Self.updatedZoneIDs(
+                existing: existingZoneIDs,
+                modified: newZoneIDs,
+                deleted: deletedZoneIDs
+            )
+        )
+    }
+    
+    /// The cached zone list after a fetch: existing and modified zones, minus deleted ones
+    /// unless they were re-created (reported modified as well), without duplicates.
+    static func updatedZoneIDs(
+        existing: [CKRecordZone.ID],
+        modified: [CKRecordZone.ID],
+        deleted: [CKRecordZone.ID]
+    ) -> [CKRecordZone.ID] {
+        let removedZoneIDs = Set(deleted).subtracting(modified)
+        var seenZoneIDs = Set<CKRecordZone.ID>()
+        return (existing + modified).filter { zoneID in
+            !removedZoneIDs.contains(zoneID) && seenZoneIDs.insert(zoneID).inserted
+        }
     }
 }
 

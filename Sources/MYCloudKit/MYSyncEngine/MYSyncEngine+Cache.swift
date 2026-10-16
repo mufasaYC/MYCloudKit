@@ -3,6 +3,7 @@
 //
 
 import CloudKit
+import CryptoKit
 
 extension MYSyncEngine {
     /// A singleton responsible for managing all local caching related to CloudKit sync operations,
@@ -190,13 +191,30 @@ extension MYSyncEngine.Cache {
 // MARK: - Encoded System Fields
 
 extension MYSyncEngine.Cache {
+    /// The file holding a record's encoded system fields.
+    ///
+    /// Record names may contain `/` and be up to 255 characters, neither of which a filename allows.
+    /// Names that are already valid filenames keep their original file, so existing caches still work.
+    static func encodedSystemFieldsFileName(for recordName: String) -> String {
+        let fileName = recordName.replacingOccurrences(of: "/", with: "%2F")
+        let pathExtension = ".bin"
+        // APFS limits a filename to 255 UTF-8 bytes.
+        guard fileName.utf8.count + pathExtension.utf8.count <= 255 else {
+            let digest = SHA256.hash(data: Data(recordName.utf8))
+            return digest.map { String(format: "%02x", $0) }.joined() + pathExtension
+        }
+        return fileName + pathExtension
+    }
+    
+    private func encodedSystemFieldsURL(for recordName: String) -> URL {
+        encodedSystemFieldsDirectoryURL
+            .appendingPathComponent(Self.encodedSystemFieldsFileName(for: recordName), isDirectory: false)
+    }
+    
     /// Stores the encoded system fields of a record (used for preserving CKRecord metadata).
     func saveEncodedSystemFields(data: Data, for recordName: String) {
-        let url = encodedSystemFieldsDirectoryURL
-            .appendingPathComponent(recordName)
-            .appendingPathExtension("bin")
         do {
-            try data.write(to: url)
+            try data.write(to: encodedSystemFieldsURL(for: recordName))
         } catch {
             logger.log("🛑 Failed to save encoded system fields for record (\(recordName))", error: error)
         }
@@ -204,15 +222,33 @@ extension MYSyncEngine.Cache {
 
     /// Retrieves previously saved system fields data for a record.
     func getEncodedSystemFields(for recordName: String) -> Data? {
-        let url = encodedSystemFieldsDirectoryURL
-            .appendingPathComponent(recordName)
-            .appendingPathExtension("bin")
-        return try? Data(contentsOf: url)
+        try? Data(contentsOf: encodedSystemFieldsURL(for: recordName))
+    }
+    
+    /// Removes a record's cached system fields, so its next save creates a fresh record.
+    func deleteEncodedSystemFields(for recordName: String) {
+        let url = encodedSystemFieldsURL(for: recordName)
+        guard fileManager.fileExists(atPath: url.path) else {
+            return
+        }
+        do {
+            try fileManager.removeItem(at: url)
+        } catch {
+            logger.log("🛑 Failed to remove encoded system fields for record (\(recordName))", error: error)
+        }
     }
 
     /// Removes cached CloudKit system fields only for records in the specified zone.
-    /// Records re-uploaded after an encrypted-data reset must not reuse stale change tags.
+    /// Records re-uploaded after a zone deletion or an encrypted-data reset must not reuse stale change tags.
     func deleteEncodedSystemFields(in zoneID: CKRecordZone.ID) {
+        deleteEncodedSystemFields(in: [zoneID])
+    }
+    
+    /// Removes cached CloudKit system fields for records in any of `zoneIDs`, reading the cache once.
+    func deleteEncodedSystemFields(in zoneIDs: Set<CKRecordZone.ID>) {
+        guard !zoneIDs.isEmpty else {
+            return
+        }
         do {
             let fileURLs = try fileManager.contentsOfDirectory(
                 at: encodedSystemFieldsDirectoryURL,
@@ -222,14 +258,14 @@ extension MYSyncEngine.Cache {
             for fileURL in fileURLs where fileURL.pathExtension == "bin" {
                 guard let data = try? Data(contentsOf: fileURL),
                       let record = CKRecord(data: data),
-                      record.recordID.zoneID == zoneID else {
+                      zoneIDs.contains(record.recordID.zoneID) else {
                     continue
                 }
                 try fileManager.removeItem(at: fileURL)
             }
         } catch {
             logger.log(
-                "🛑 Failed to clear encoded system fields for zone '\(zoneID.zoneName)'",
+                "🛑 Failed to clear encoded system fields for zones \(zoneIDs.map(\.zoneName))",
                 error: error
             )
         }
@@ -277,12 +313,16 @@ extension MYSyncEngine.Cache {
     }
     
     func deleteZoneID(_ zoneID: CKRecordZone.ID) {
-        var newZoneIDs = getZoneIDs()
-        guard let index = newZoneIDs.firstIndex(of: zoneID) else {
+        deleteZoneIDs([zoneID])
+    }
+    
+    func deleteZoneIDs(_ zoneIDs: Set<CKRecordZone.ID>) {
+        let existingZoneIDs = getZoneIDs()
+        let remainingZoneIDs = existingZoneIDs.filter { !zoneIDs.contains($0) }
+        guard remainingZoneIDs.count != existingZoneIDs.count else {
             return
         }
-        newZoneIDs.remove(at: index)
-        setZoneIDs(newZoneIDs)
+        setZoneIDs(remainingZoneIDs)
     }
 }
 
