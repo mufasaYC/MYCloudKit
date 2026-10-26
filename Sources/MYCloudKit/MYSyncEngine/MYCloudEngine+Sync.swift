@@ -18,7 +18,7 @@ extension MYSyncEngine {
     /// The method updates `syncState` to reflect the current progress and handles retries, caching, and errors.
 
     func sync() async -> SyncState {
-        guard cloudKitAccountStatus == .available else {
+        guard await refreshCloudKitAccountStatusIfNeeded() else {
             return .stopped(
                 queueCount: queue.count,
                 error: NSError(domain: "CloudKit account cannot sync", code: 403)
