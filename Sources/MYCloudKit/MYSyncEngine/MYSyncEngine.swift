@@ -259,14 +259,23 @@ public final class MYSyncEngine: ObservableObject {
             guard let self else {
                 return
             }
-            if cloudKitAccountStatus != .available {
-                self.cloudKitAccountStatus =  try await ckContainer.accountStatus()
-            }
             await self.beginFetch()
             await self.beginSync()
         }
     }
-    
+
+    /// Asks CloudKit again when an earlier error marked the account unavailable, so a passing iCloud hiccup doesn't
+    /// stop fetching and syncing. watchOS has no foreground notification to recover from it otherwise.
+    func refreshCloudKitAccountStatusIfNeeded() async -> Bool {
+        guard cloudKitAccountStatus != .available else {
+            return true
+        }
+        if let status = try? await ckContainer.accountStatus() {
+            self.cloudKitAccountStatus = status
+        }
+        return cloudKitAccountStatus == .available
+    }
+
     /// Starts syncing the queue.
     ///
     /// Calling this resumes a sync paused by `syncPausedError` and skips any pending backoff,
