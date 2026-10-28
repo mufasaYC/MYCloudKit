@@ -171,12 +171,15 @@ public final class MYSyncEngine: ObservableObject {
     ///   - maxRetryAttempts: The number of retry attempts before giving up on failed sync attempts. Defaults to 3.
     ///   - logLevel: The minimum log level to be printed. Defaults to `.debug`.
     ///   - databaseScopes: At least one private and/or shared database to fetch and subscribe to. Defaults to both.
+    ///   - logHandler: Receives log messages at `logLevel` and above instead of printing them, for example to send
+    ///     sync errors to your crash reporter. It's called from any thread. Defaults to `nil`, which prints them.
     public init(
         containerIdentifier: String? = nil,
         userDefaultsSuiteName: String? = nil,
         maxRetryAttempts: Int = 3,
         logLevel: LogLevel = .debug,
-        databaseScopes: Set<CKDatabase.Scope> = [.private, .shared]
+        databaseScopes: Set<CKDatabase.Scope> = [.private, .shared],
+        logHandler: LogHandler? = nil
     ) {
         precondition(
             !databaseScopes.isEmpty,
@@ -187,7 +190,7 @@ public final class MYSyncEngine: ObservableObject {
             "MYSyncEngine supports only the private and shared CloudKit database scopes."
         )
 
-        let logger = Logger(currentLevel: logLevel)
+        let logger = Logger(currentLevel: logLevel, handler: logHandler)
         let syncCache: Cache = .init(suiteName: userDefaultsSuiteName, logger: logger)
         self.cache = syncCache
         let transactionQueue = TransactionQueue(cache: syncCache)
