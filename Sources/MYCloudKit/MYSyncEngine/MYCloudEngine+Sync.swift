@@ -21,7 +21,7 @@ extension MYSyncEngine {
         guard await refreshCloudKitAccountStatusIfNeeded() else {
             return .stopped(
                 queueCount: queue.count,
-                error: NSError(domain: "CloudKit account cannot sync", code: 403)
+                error: AccountUnavailableError(accountStatus: cloudKitAccountStatus)
             )
         }
         /// Batch sync in order of what is returned in `MYSyncDelegate.syncableRecordTypesInDependencyOrder()`
