@@ -143,6 +143,9 @@ public final class MYSyncEngine: ObservableObject {
     @Published public private(set) var syncPausedError: CKError? = nil
     
     private var didAddForegroundNotificationObserver: Bool = false
+    
+    /// Runs fetch passes one at a time, adding a pass for any `beginFetch()` call made during one.
+    private let fetchCoalescer = FetchCoalescer()
 
     /// Queue of pending transactions to be synced.
     private let transactionQueue: TransactionQueue
@@ -387,14 +390,21 @@ public final class MYSyncEngine: ObservableObject {
         }
     }
     
+    /// Fetches changes from CloudKit and publishes the result in `fetchState`.
+    ///
+    /// A call made while a fetch is running returns at once, and the running fetch makes one more pass when it
+    /// finishes. That pass may already have read its change token before the change that prompted the call
+    /// (a silent push arriving mid-fetch), which would otherwise stay hidden until the next push or foreground.
     @MainActor
     public func beginFetch() async {
         addForegroundNotificationObserver()
-        guard !fetchState.isActive else {
-            return
+        await fetchCoalescer.run { [weak self] in
+            guard let self else {
+                return
+            }
+            self.fetchState = .fetching
+            self.fetchState = await self.fetch()
         }
-        self.fetchState = .fetching
-        self.fetchState = await fetch()
     }
     
     func queueUpdated() {
