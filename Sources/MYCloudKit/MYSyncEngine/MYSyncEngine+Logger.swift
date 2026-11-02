@@ -17,12 +17,22 @@ extension MYSyncEngine {
         }
     }
     
+    /// Receives MYCloudKit's log messages instead of the console. See `MYSyncEngine.init(logHandler:)`.
+    ///
+    /// - Parameters:
+    ///   - level: The message's level. Never `.none`.
+    ///   - message: The message, without the level symbol or "MYSyncKit:" prefix.
+    ///   - error: The error the message is about, if any.
+    public typealias LogHandler = @Sendable (_ level: LogLevel, _ message: String, _ error: Error?) -> Void
+    
     struct Logger {
         
         private let currentLevel: LogLevel
+        private let handler: LogHandler?
         
-        init(currentLevel: LogLevel) {
+        init(currentLevel: LogLevel, handler: LogHandler? = nil) {
             self.currentLevel = currentLevel
+            self.handler = handler
         }
         
         func log(_ message: String, level: LogLevel = .info, error: Error? = nil) {
@@ -37,6 +47,11 @@ extension MYSyncEngine {
                 case .warning: symbol = "⚠️"
                 case .error: symbol = "⛔"
                 case .none: return
+            }
+            
+            if let handler {
+                handler(level, message, error)
+                return
             }
             
             print("\(symbol) MYSyncKit: \(message)")

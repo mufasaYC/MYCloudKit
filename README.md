@@ -87,6 +87,15 @@ to the database that owns their zone.
 
 > Provide the correct `containerIdentifier` if you're not using the default one. 
 
+MYCloudKit prints its logs to the console. To send them to your own logging or crash reporter
+instead, pass a `logHandler`. It receives messages at `logLevel` and above, from any thread:
+
+```swift
+let syncEngine = MYSyncEngine(logLevel: .warning) { level, message, error in
+    MyLogger.log(message, error: error)
+}
+```
+
 2. Syncing Records
 
 To sync records, call the `sync(_:)` method on the `MYSyncEngine`. This will enqueue the record for syncing with CloudKit. The engine automatically handles uploading the record, retrying if necessary, and ensuring dependent records are synced in the correct order.
