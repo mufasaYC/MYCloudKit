@@ -171,12 +171,17 @@ public final class MYSyncEngine: ObservableObject {
     ///   - maxRetryAttempts: The number of retry attempts before giving up on failed sync attempts. Defaults to 3.
     ///   - logLevel: The minimum log level to be printed. Defaults to `.debug`.
     ///   - databaseScopes: At least one private and/or shared database to fetch and subscribe to. Defaults to both.
+    ///   - qualityOfService: The quality of service for every CloudKit request the engine makes. If `nil`, CloudKit's
+    ///     default is used, which is discretionary: the system picks a convenient time, and holds requests while it sees
+    ///     the app as in the background. Pass `.userInitiated` from a process the system never sees as a foreground app,
+    ///     such as a command-line tool, so its requests run straight away.
     public init(
         containerIdentifier: String? = nil,
         userDefaultsSuiteName: String? = nil,
         maxRetryAttempts: Int = 3,
         logLevel: LogLevel = .debug,
-        databaseScopes: Set<CKDatabase.Scope> = [.private, .shared]
+        databaseScopes: Set<CKDatabase.Scope> = [.private, .shared],
+        qualityOfService: QualityOfService? = nil
     ) {
         precondition(
             !databaseScopes.isEmpty,
@@ -201,18 +206,27 @@ public final class MYSyncEngine: ObservableObject {
         }
         self.databaseScopes = databaseScopes
         // Set the CKContainer to either custom or default.
+        let container: CKContainer
         if let containerIdentifier {
             self.logger.log(
                 "☁️ Using custom CloudKit container '\(containerIdentifier)'",
                 level: .info
             )
-            self.ckContainer = .init(identifier: containerIdentifier)
+            container = .init(identifier: containerIdentifier)
         } else {
             self.logger.log(
                 "☁️ Using default CloudKit container",
                 level: .info
             )
-            self.ckContainer = .default()
+            container = .default()
+        }
+        // A configured container hands its configuration to its databases and every request made through them.
+        if let qualityOfService {
+            let configuration = CKOperation.Configuration()
+            configuration.qualityOfService = qualityOfService
+            self.ckContainer = container.configuredWith(configuration: configuration) { $0 }
+        } else {
+            self.ckContainer = container
         }
         
         // Use shared UserDefaults if userDefaultsSuiteName is provided, else fall back to standard.
