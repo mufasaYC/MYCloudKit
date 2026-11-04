@@ -87,6 +87,8 @@ to the database that owns their zone.
 
 > Provide the correct `containerIdentifier` if you're not using the default one. 
 
+> CloudKit requests run at its default, discretionary priority, so the system holds them while it sees your app as in the background. A process it never sees in the foreground, such as a command-line tool, should pass `qualityOfService: .userInitiated` so its requests run straight away.
+
 2. Syncing Records
 
 To sync records, call the `sync(_:)` method on the `MYSyncEngine`. This will enqueue the record for syncing with CloudKit. The engine automatically handles uploading the record, retrying if necessary, and ensuring dependent records are synced in the correct order.
