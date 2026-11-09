@@ -72,6 +72,8 @@ extension MYSyncEngine {
             return
         }
         let plan = Self.planBatch(transactions, using: cache)
+        /// Runs on every exit, after any retry below, so an older save never outlives the newer one replacing it.
+        defer { removeSupersededSaves(plan) }
         /// Transactions that can't be converted to a `CKRecord` are removed from the queue or retried.
         plan.unparsable.forEach {
             self.handleError(NSError(domain: "Cannot parse CKRecord", code: 500), for: $0)
@@ -357,6 +359,29 @@ extension MYSyncEngine {
             try await self.syncTransactions(plan.deferred, recordType: recordType)
         }
     }
+
+    /// Removes the older saves replaced by a newer save in `plan` once that newer save has left the queue
+    /// (uploaded, or dropped as unsyncable). While it stays queued for a retry, they stay with it, so the
+    /// next pass merges them again instead of uploading an older copy on its own.
+    private func removeSupersededSaves(_ plan: BatchPlan) {
+        let removable = Self.supersededSavesToRemove(plan, queuedTransactionIDs: Set(queue.map(\.id)))
+        guard !removable.isEmpty else {
+            return
+        }
+        let removableIDs = Set(removable.map(\.id))
+        mutateQueue { $0.removeAll { removableIDs.contains($0.id) } }
+        removable.forEach { self.cache.removeCache(for: $0) }
+    }
+
+    static func supersededSavesToRemove(_ plan: BatchPlan, queuedTransactionIDs: Set<UUID>) -> [Transaction] {
+        plan.supersededSaves.flatMap { recordID, olderSaves -> [Transaction] in
+            guard let newest = plan.recordIDTransactionMap[recordID],
+                  !queuedTransactionIDs.contains(newest.id) else {
+                return []
+            }
+            return olderSaves
+        }
+    }
 }
 
 extension MYSyncEngine {
@@ -372,6 +397,10 @@ extension MYSyncEngine {
         /// Transactions already satisfied by another operation in this batch.
         var completed: [Transaction] = []
 
+        /// Older saves of a record replaced by a newer save in this batch, keyed by the record they save.
+        /// They leave the queue only once the newer save does, so nothing is lost if its upload fails.
+        var supersededSaves: [CKRecord.ID: [Transaction]] = [:]
+
         /// Transactions that must run after this batch finishes, to keep queue order.
         var deferred: [Transaction] = []
 
@@ -384,7 +413,8 @@ extension MYSyncEngine {
     /// Transactions are applied in queue order:
     /// - A save followed by a delete of the same record only deletes it.
     /// - A delete followed by a save of the same record deletes it first, then saves it in a follow-up pass.
-    /// - Repeated saves of the same record upload the first one; the rest stay queued for the next sync.
+    /// - Repeated saves of the same record upload once, with the newest values. A key set only by an older save
+    ///   keeps that save's value, so CloudKit ends up as if every save had been uploaded in order.
     static func planBatch(_ transactions: [Transaction], using cache: Cache) -> BatchPlan {
         var plan = BatchPlan()
 
@@ -397,6 +427,17 @@ extension MYSyncEngine {
                 case .createOrUpdate:
                     if plan.recordsToDelete.contains(ckRecord.recordID) {
                         plan.deferred.append(transaction)
+                    } else if let previous = plan.recordIDTransactionMap[ckRecord.recordID],
+                              previous.operationType == .createOrUpdate,
+                              let index = plan.recordsToSave.firstIndex(where: { $0.recordID == ckRecord.recordID }) {
+                        let olderSaves = plan.supersededSaves[ckRecord.recordID, default: []] + [previous]
+                        let olderKeys = olderSaves.reduce(into: Set<String>()) { $0.formUnion($1.properties.keys) }
+                        for key in olderKeys.subtracting(transaction.properties.keys) {
+                            ckRecord[key] = plan.recordsToSave[index][key]
+                        }
+                        plan.recordsToSave[index] = ckRecord
+                        plan.recordIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID)
+                        plan.supersededSaves[ckRecord.recordID] = olderSaves
                     } else if plan.recordIDTransactionMap[ckRecord.recordID] == nil {
                         plan.recordsToSave.append(ckRecord)
                         plan.recordIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID)
@@ -409,6 +450,7 @@ extension MYSyncEngine {
                 case .deleteRecord:
                     if let saveIndex = plan.recordsToSave.firstIndex(where: { $0.recordID == ckRecord.recordID }) {
                         plan.recordsToSave.remove(at: saveIndex)
+                        plan.completed.append(contentsOf: plan.supersededSaves.removeValue(forKey: ckRecord.recordID) ?? [])
                         if let transaction = plan.recordIDTransactionMap[ckRecord.recordID] {
                             plan.completed.append(transaction)
                         } else {

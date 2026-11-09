@@ -52,16 +52,92 @@ final class SyncPlanningTests: XCTestCase {
         XCTAssertTrue(plan.deferred.isEmpty)
     }
 
-    func testRepeatedSavesUploadFirstAndLeaveRestQueued() {
-        let first = transaction(.createOrUpdate, "x")
-        let second = transaction(.createOrUpdate, "x")
+    func testRepeatedSavesUploadTheNewestOnce() {
+        let morning = save("x", ["title": .string("Morning")])
+        let noon = save("x", ["title": .string("Noon")])
+        let evening = save("x", ["title": .string("Evening")])
+
+        let plan = MYSyncEngine.planBatch([morning, noon, evening], using: cache)
+
+        XCTAssertEqual(plan.recordsToSave.count, 1)
+        XCTAssertEqual(plan.recordsToSave.first?["title"] as? String, "Evening")
+        XCTAssertEqual(plan.recordIDTransactionMap.values.map(\.id), [evening.id])
+        XCTAssertEqual(plan.supersededSaves.values.first?.map(\.id), [morning.id, noon.id])
+        XCTAssertTrue(plan.completed.isEmpty)
+        XCTAssertTrue(plan.deferred.isEmpty)
+    }
+
+    func testRepeatedSavesKeepKeysOnlyAnOlderSaveSet() {
+        let first = save("x", ["title": .string("Morning"), "note": .string("Coffee")])
+        let second = save("x", ["title": .string("Evening")])
 
         let plan = MYSyncEngine.planBatch([first, second], using: cache)
 
-        XCTAssertEqual(plan.recordsToSave.count, 1)
-        XCTAssertEqual(plan.recordIDTransactionMap.values.map(\.id), [first.id])
-        XCTAssertTrue(plan.completed.isEmpty)
-        XCTAssertTrue(plan.deferred.isEmpty)
+        XCTAssertEqual(plan.recordsToSave.first?["title"] as? String, "Evening")
+        XCTAssertEqual(plan.recordsToSave.first?["note"] as? String, "Coffee")
+    }
+
+    func testRepeatedSavesKeepAValueTheNewestSaveCleared() {
+        let first = save("x", ["title": .string("Morning"), "note": .string("Coffee")])
+        let second = save("x", ["title": .string("Evening"), "note": .string(nil)])
+
+        let plan = MYSyncEngine.planBatch([first, second], using: cache)
+
+        XCTAssertEqual(plan.recordsToSave.first?["title"] as? String, "Evening")
+        XCTAssertNil(plan.recordsToSave.first?["note"])
+    }
+
+    func testRepeatedSavesOfDifferentRecordsStaySeparate() {
+        let a1 = save("a", ["title": .string("A1")])
+        let b1 = save("b", ["title": .string("B1")])
+        let a2 = save("a", ["title": .string("A2")])
+
+        let plan = MYSyncEngine.planBatch([a1, b1, a2], using: cache)
+
+        XCTAssertEqual(plan.recordsToSave.map(\.recordID.recordName), ["a", "b"])
+        XCTAssertEqual(plan.recordsToSave.map { $0["title"] as? String }, ["A2", "B1"])
+        XCTAssertEqual(plan.supersededSaves.count, 1)
+    }
+
+    func testDeleteAfterRepeatedSavesCompletesEverySave() {
+        let first = save("x", ["title": .string("Morning")])
+        let second = save("x", ["title": .string("Evening")])
+        let delete = transaction(.deleteRecord, "x")
+
+        let plan = MYSyncEngine.planBatch([first, second, delete], using: cache)
+
+        XCTAssertTrue(plan.recordsToSave.isEmpty)
+        XCTAssertEqual(plan.recordsToDelete.map(\.recordName), ["x"])
+        XCTAssertEqual(plan.completed.map(\.id), [first.id, second.id])
+        XCTAssertTrue(plan.supersededSaves.isEmpty)
+    }
+
+    func testRepeatedSavesAfterDeleteAreDeferredTogether() {
+        let delete = transaction(.deleteRecord, "x")
+        let first = save("x", ["title": .string("Morning")])
+        let second = save("x", ["title": .string("Evening")])
+
+        let plan = MYSyncEngine.planBatch([delete, first, second], using: cache)
+        XCTAssertEqual(plan.deferred.map(\.id), [first.id, second.id])
+
+        let followUp = MYSyncEngine.planBatch(plan.deferred, using: cache)
+        XCTAssertEqual(followUp.recordsToSave.map { $0["title"] as? String }, ["Evening"])
+    }
+
+    func testOlderSavesLeaveTheQueueOnlyWithTheNewest() {
+        let first = save("x", ["title": .string("Morning")])
+        let second = save("x", ["title": .string("Evening")])
+        let plan = MYSyncEngine.planBatch([first, second], using: cache)
+
+        // The newest save is still queued (its upload failed and will be retried): keep the older one too.
+        XCTAssertTrue(
+            MYSyncEngine.supersededSavesToRemove(plan, queuedTransactionIDs: [first.id, second.id]).isEmpty
+        )
+        // The newest save left the queue (uploaded, or dropped as unsyncable): the older one goes with it.
+        XCTAssertEqual(
+            MYSyncEngine.supersededSavesToRemove(plan, queuedTransactionIDs: [first.id]).map(\.id),
+            [first.id]
+        )
     }
 
     func testUnrelatedRecordsAreUnaffected() {
@@ -90,6 +166,18 @@ final class SyncPlanningTests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    private func save(
+        _ recordName: String,
+        _ properties: [String: MYSyncEngine.Transaction.RecordValue?]
+    ) -> MYSyncEngine.Transaction {
+        .init(
+            id: .init(),
+            operationType: .createOrUpdate,
+            record: .init(recordName: recordName, recordType: "Item", zoneName: "Zone", parentRecordName: nil),
+            properties: properties
+        )
+    }
 
     private func transaction(
         _ operationType: MYSyncEngine.Transaction.OperationType,
