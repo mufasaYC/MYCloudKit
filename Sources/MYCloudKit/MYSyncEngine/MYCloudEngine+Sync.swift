@@ -67,7 +67,11 @@ extension MYSyncEngine {
         return .completed(date: .now)
     }
     
-    private func syncTransactions(_ transactions: [Transaction], recordType: String) async throws {
+    private func syncTransactions(
+        _ transactions: [Transaction],
+        recordType: String,
+        isConflictRetry: Bool = false
+    ) async throws {
         guard let databaseScope = transactions.first?.databaseScope(using: cache) else {
             return
         }
@@ -89,6 +93,8 @@ extension MYSyncEngine {
         let recordsToCascadeDelete = plan.recordsToCascadeDelete
         var missingZoneTransactionsByZoneID: [CKRecordZone.ID: [Transaction]] = [:]
         var missingZoneTransactionsToBeRetried: [Transaction] = []
+        /// Saves rejected because iCloud's copy changed since this device last saw it.
+        var conflicts: [SaveConflict] = []
 
         self.logger.log(
             "🌀 Syncing \(recordsToSave.count) '\(recordType)'\n🗑️ Deleting \(recordsToDelete.count) '\(recordType)'",
@@ -112,7 +118,9 @@ extension MYSyncEngine {
                     try await database.modifyRecords(
                         saving: saving,
                         deleting: deleting,
-                        savePolicy: .allKeys,
+                        // Only replace the copy this device last saw: a newer one from another device is reported
+                        // as `.serverRecordChanged` and resolved below instead of being overwritten.
+                        savePolicy: .ifServerRecordUnchanged,
                         atomically: false
                     )
                 }
@@ -158,6 +166,16 @@ extension MYSyncEngine {
                                         }
                                         
                                         missingZoneTransactionsByZoneID[recordID.zoneID, default: []].append(transaction)
+                                    case .serverRecordChanged
+                                        where transaction.operationType == .createOrUpdate && error.serverRecord != nil:
+                                        conflicts.append(
+                                            .init(
+                                                transaction: transaction,
+                                                serverRecord: error.serverRecord!,
+                                                localRecord: recordsToSave.first { $0.recordID == recordID }
+                                                    ?? error.clientRecord
+                                            )
+                                        )
                                     default:
                                         transactionsFailed.updateValue(error, forKey: transaction)
                                         failureSavesCount += 1
@@ -335,6 +353,26 @@ extension MYSyncEngine {
             }
         }
         
+        // MARK: Resolve Conflicts
+        let conflictResolution = Self.resolveConflicts(conflicts) { serverRecord, localRecord in
+            self.delegate?.shouldKeepServerRecord(serverRecord, over: localRecord) ?? false
+        }
+        // iCloud's copy won: this save is done, and the copy is applied below like a fetched record.
+        transactionsCompleted.append(contentsOf: conflictResolution.keptServer.map(\.transaction))
+        // This device's copy won: upload it again on top of the copy it replaces.
+        for conflict in conflictResolution.keptLocal {
+            self.cache.saveEncodedSystemFields(
+                data: conflict.serverRecord.encodedSystemFields,
+                for: conflict.serverRecord.recordID.recordName
+            )
+        }
+        if !conflicts.isEmpty {
+            self.logger.log(
+                "🔀 \(conflicts.count) '\(recordType)' changed in iCloud since this device saw them: kept iCloud's copy of \(conflictResolution.keptServer.count), this device's of \(conflictResolution.keptLocal.count)",
+                level: .debug
+            )
+        }
+
         let completedTransactionIDs = Set(transactionsCompleted.map { $0.id })
         transactionsFailed.forEach { transaction, error in
             self.handleError(error, for: transaction)
@@ -343,6 +381,11 @@ extension MYSyncEngine {
         mutateQueue { $0.removeAll { completedTransactionIDs.contains($0.id) } }
         transactionsCompleted.forEach { self.cache.removeCache(for: $0) }
 
+        // Applied after the queue update, so a later queued save of the same record is weighed against it.
+        if !conflictResolution.keptServer.isEmpty {
+            _ = await self.recordsToSave(conflictResolution.keptServer.map(\.serverRecord))
+        }
+
         if !transactionsFailed.isEmpty {
             throw SyncRetryPolicy.mostSignificantError(in: Array(transactionsFailed.values))
                 ?? NSError(domain: "Something went wrong", code: 500)
@@ -350,6 +393,15 @@ extension MYSyncEngine {
         
         if !missingZoneTransactionsToBeRetried.isEmpty {
             try await self.syncTransactions(missingZoneTransactionsToBeRetried, recordType: recordType)
+        }
+
+        // Once per pass: if iCloud's copy changed again meanwhile, the save waits in the queue for the next pass.
+        if !isConflictRetry, !conflictResolution.keptLocal.isEmpty {
+            try await self.syncTransactions(
+                conflictResolution.keptLocal.map(\.transaction),
+                recordType: recordType,
+                isConflictRetry: true
+            )
         }
 
         /// Runs once this batch's deletes have completed, so queue order is preserved.
@@ -754,5 +806,40 @@ extension MYSyncEngine {
         }
 
         return recordIDs
+    }
+}
+
+extension MYSyncEngine {
+    /// A save CloudKit rejected with `.serverRecordChanged`: another device changed the record since this device
+    /// last saw it.
+    struct SaveConflict {
+        let transaction: Transaction
+        let serverRecord: CKRecord
+        let localRecord: CKRecord?
+    }
+
+    struct ConflictResolution {
+        /// iCloud's copy wins: the save is dropped and the copy is applied locally.
+        var keptServer: [SaveConflict] = []
+        /// This device's copy wins: it is uploaded again over iCloud's copy.
+        var keptLocal: [SaveConflict] = []
+    }
+
+    /// Asks `keepServer` which copy wins for each conflict. Without the local copy there is nothing to compare,
+    /// so this device's copy is kept, as before conflicts were reported.
+    static func resolveConflicts(
+        _ conflicts: [SaveConflict],
+        keepServer: (FetchedRecord, FetchedRecord) -> Bool
+    ) -> ConflictResolution {
+        var resolution = ConflictResolution()
+        for conflict in conflicts {
+            if let localRecord = conflict.localRecord,
+               keepServer(FetchedRecord(record: conflict.serverRecord), FetchedRecord(record: localRecord)) {
+                resolution.keptServer.append(conflict)
+            } else {
+                resolution.keptLocal.append(conflict)
+            }
+        }
+        return resolution
     }
 }

@@ -23,6 +23,7 @@ public typealias MYRecordType = String
 /// - **didReceiveGroupIDsToResync**: Called after an encrypted-data reset so the app can queue every local record in the affected groups for upload again.
 /// - **handleUnsyncableRecord**: Handles records that failed to sync, allowing for custom resolution logic and retries, you can see the reason and then add records that need to be synced before it or send over the corrected record and it will put this in place of the current record in the queue position.
 /// - **syncableRecordTypesInDependencyOrder**: Returns the list of record types eligible for syncing in the correct order (parent and references before child and records referenced respectably).
+/// - **shouldKeepServerRecord**: Picks which copy wins when another device changed a record this device has a change of waiting to upload. Optional; by default this device's copy wins.
 ///
 /// ### Example Usage:
 /// Here’s how you might implement the methods of `MYSyncDelegate`:
@@ -133,9 +134,33 @@ public protocol MYSyncDelegate: AnyObject {
     /// }
     /// ```
     func syncableRecordTypesInDependencyOrder() -> [MYRecordType]
+
+    /// Called when a record was changed in iCloud by another device while this device has its own change of the
+    /// same record waiting to upload, so one copy would replace the other.
+    ///
+    /// MYCloudKit asks in two places: when an upload finds that iCloud's copy changed since this device last saw it,
+    /// and when a fetch brings a record that still has a save waiting in the queue.
+    /// - Parameters:
+    ///   - serverRecord: The copy in iCloud.
+    ///   - localRecord: This device's copy, as it would be uploaded.
+    /// - Returns: `true` to keep iCloud's copy: this device's waiting save is dropped and `serverRecord` is passed to
+    ///   `didReceiveRecordsToSave(_:)`. `false` to keep this device's copy: it is uploaded over iCloud's, and the
+    ///   fetched copy is not passed to the app. The default returns `false`.
+    func shouldKeepServerRecord(
+        _ serverRecord: MYSyncEngine.FetchedRecord,
+        over localRecord: MYSyncEngine.FetchedRecord
+    ) -> Bool
 }
 
 public extension MYSyncDelegate {
+    /// Keeps this device's copy, so the last device to upload wins.
+    func shouldKeepServerRecord(
+        _ serverRecord: MYSyncEngine.FetchedRecord,
+        over localRecord: MYSyncEngine.FetchedRecord
+    ) -> Bool {
+        false
+    }
+
     /// Preserves source compatibility for apps that have not opted into encrypted-data-reset recovery.
     /// Returning `false` keeps the recovery request pending for a future successful fetch.
     func didReceiveGroupIDsToResync(_ ids: [String]) async -> Bool {
