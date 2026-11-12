@@ -159,6 +159,20 @@ public final class MYSyncEngine: ObservableObject {
     func mutateQueue<T>(_ body: (inout [Transaction]) -> T) -> T {
         transactionQueue.mutate(body)
     }
+
+    /// Picks up queued transactions for a sync pass. See `TransactionQueue.beginSending(where:)`.
+    func beginSending(where isIncluded: (Transaction) -> Bool) -> [Transaction] {
+        transactionQueue.beginSending(where: isIncluded)
+    }
+
+    func finishSending(_ picked: [Transaction]) {
+        transactionQueue.finishSending(picked)
+    }
+
+    /// Queues saves, replacing waiting saves of the same records. See `TransactionQueue.enqueueSaves(_:)`.
+    func enqueueSaves(_ saves: [Transaction]) -> [Transaction] {
+        transactionQueue.enqueueSaves(saves)
+    }
     
     /// Optional delegate to receive sync lifecycle callbacks.
     public weak var delegate: MYSyncDelegate?
