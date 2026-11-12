@@ -34,17 +34,17 @@ extension MYSyncEngine {
         for recordType in orderedRecordTypes {
             var privateTransactions: [Transaction] = []
             var sharedTransactions: [Transaction] = []
-            
-            for transaction in self.queue {
-                if transaction.record.recordType == recordType {
-                    switch transaction.databaseScope(using: cache) {
-                        case .private:
-                            privateTransactions.append(transaction)
-                        case .shared:
-                            sharedTransactions.append(transaction)
-                        default:
-                            assertionFailure("Unsupported database scope")
-                    }
+
+            let picked = beginSending { $0.record.recordType == recordType }
+            defer { finishSending(picked) }
+            for transaction in picked {
+                switch transaction.databaseScope(using: cache) {
+                    case .private:
+                        privateTransactions.append(transaction)
+                    case .shared:
+                        sharedTransactions.append(transaction)
+                    default:
+                        assertionFailure("Unsupported database scope")
                 }
             }
             
@@ -384,7 +384,9 @@ extension MYSyncEngine {
     /// Transactions are applied in queue order:
     /// - A save followed by a delete of the same record only deletes it.
     /// - A delete followed by a save of the same record deletes it first, then saves it in a follow-up pass.
-    /// - Repeated saves of the same record upload the first one; the rest stay queued for the next sync.
+    /// - Repeated saves of the same record upload only the newest. Each save holds the whole record, so the older
+    ///   ones are complete with it. Queuing already replaces older saves; this covers a save queued while an older
+    ///   one was being sent, and queues persisted by earlier versions.
     static func planBatch(_ transactions: [Transaction], using cache: Cache) -> BatchPlan {
         var plan = BatchPlan()
 
@@ -397,6 +399,12 @@ extension MYSyncEngine {
                 case .createOrUpdate:
                     if plan.recordsToDelete.contains(ckRecord.recordID) {
                         plan.deferred.append(transaction)
+                    } else if let older = plan.recordIDTransactionMap[ckRecord.recordID],
+                              older.operationType == .createOrUpdate,
+                              let index = plan.recordsToSave.firstIndex(where: { $0.recordID == ckRecord.recordID }) {
+                        plan.recordsToSave[index] = ckRecord
+                        plan.recordIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID)
+                        plan.completed.append(older)
                     } else if plan.recordIDTransactionMap[ckRecord.recordID] == nil {
                         plan.recordsToSave.append(ckRecord)
                         plan.recordIDTransactionMap.updateValue(transaction, forKey: ckRecord.recordID)
