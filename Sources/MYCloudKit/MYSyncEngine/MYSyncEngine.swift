@@ -346,13 +346,37 @@ public final class MYSyncEngine: ObservableObject {
             guard let self else {
                 return
             }
-            let state = await self.sync()
+            var state: SyncState
+            repeat {
+                let queuedBeforePass = Set(self.queue.map(\.id))
+                state = await self.sync()
+                // Records queued while the pass was running weren't part of it. `queueUpdated()` saw a sync
+                // in progress and skipped them, so send them now instead of reporting the sync as complete.
+                // This stops on any error, so CloudKit throttling (`requestRateLimited`) ends a runaway loop.
+                guard Self.hasRecordsQueuedDuringPass(after: state, queuedBeforePass: queuedBeforePass, queue: self.queue) else {
+                    break
+                }
+                self.logger.log("🔁 Records were queued during the sync, syncing them now", level: .debug)
+                self.syncState = .syncing(queueCount: self.queue.count)
+            } while true
             // Update the retry state before publishing, so observers of `syncState` see it consistently.
             self.applyRetryPolicy(after: state)
             self.syncState = state
         }
     }
     
+    /// Whether a pass completed while records were queued that it didn't include.
+    static func hasRecordsQueuedDuringPass(
+        after state: SyncState,
+        queuedBeforePass: Set<UUID>,
+        queue: [Transaction]
+    ) -> Bool {
+        guard case .completed = state else {
+            return false
+        }
+        return queue.contains { !queuedBeforePass.contains($0.id) }
+    }
+
     @MainActor
     private func applyRetryPolicy(after state: SyncState) {
         switch state {

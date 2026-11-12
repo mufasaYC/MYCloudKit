@@ -151,6 +151,53 @@ final class QueuedSaveReplacementTests: XCTestCase {
         XCTAssertEqual(plan.completed.map(\.id), saves.dropLast().map(\.id))
     }
 
+    // MARK: - Syncing again
+
+    func testSyncsAgainWhenRecordsWereQueuedDuringAPass() {
+        let morning = save("a", "Morning")
+        let afternoon = save("a", "Afternoon")
+
+        XCTAssertTrue(
+            MYSyncEngine.hasRecordsQueuedDuringPass(
+                after: .completed(date: .now),
+                queuedBeforePass: [morning.id],
+                queue: [afternoon]
+            )
+        )
+    }
+
+    func testDoesNotSyncAgainWithoutNewRecords() {
+        let leftover = save("a", "Morning")
+
+        XCTAssertFalse(
+            MYSyncEngine.hasRecordsQueuedDuringPass(
+                after: .completed(date: .now),
+                queuedBeforePass: [leftover.id],
+                queue: [leftover]
+            )
+        )
+        XCTAssertFalse(
+            MYSyncEngine.hasRecordsQueuedDuringPass(
+                after: .completed(date: .now),
+                queuedBeforePass: [],
+                queue: []
+            )
+        )
+    }
+
+    func testDoesNotSyncAgainAfterAFailedPass() {
+        let afternoon = save("a", "Afternoon")
+
+        // A failed pass is retried by the retry policy instead.
+        XCTAssertFalse(
+            MYSyncEngine.hasRecordsQueuedDuringPass(
+                after: .stopped(queueCount: 1, error: CKError(.networkUnavailable)),
+                queuedBeforePass: [],
+                queue: [afternoon]
+            )
+        )
+    }
+
     // MARK: - Helpers
 
     private func save(
