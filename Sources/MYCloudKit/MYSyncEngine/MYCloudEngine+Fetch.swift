@@ -681,7 +681,7 @@ extension MYSyncEngine {
         /// let childReference: String? = record.value(for: "child_record_id")
         /// ```
         public func value<T: Codable>(for key: String) -> T? {
-            if let data = ckRecord[key] as? Data,
+            if let data = (ckRecord[key] ?? ckRecord.encryptedValues[key]) as? Data,
                let value = try? JSONDecoder().decode(T.self, from: data) {
                 return value
             }
@@ -709,7 +709,10 @@ extension MYSyncEngine {
                 return result
             }
             
-            return ckRecord.value(forKey: key) as? T
+            if let value = ckRecord.value(forKey: key) as? T {
+                return value
+            }
+            return ckRecord.encryptedValues[key] as? T
         }
         
         // MARK: - Initializer
