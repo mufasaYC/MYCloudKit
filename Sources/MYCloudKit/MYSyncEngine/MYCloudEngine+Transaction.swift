@@ -64,6 +64,7 @@ extension MYSyncEngine {
         let operationType: OperationType
         let record: Record
         var properties: [String: RecordValue?]
+        var encryptedKeys: Set<String>?
         
         /// The number of retry attempts made while processing this transaction. Once this is equal to `maxAttempts` passed in the `init` of `MYCloudEngine`, it will be notified via `MYCloudEngineDelegate` and removed from the queue
         var attempts: Int = .zero
@@ -243,17 +244,18 @@ extension MYSyncEngine.Transaction {
         }
         
         for (key, value) in properties {
+            let fields: CKRecordKeyValueSetting = encryptedKeys?.contains(key) == true ? ckRecord.encryptedValues : ckRecord
             switch value {
                 case .int(let int):
-                    ckRecord[key] = int
+                    fields[key] = int
                 case .double(let double):
-                    ckRecord[key] = double
+                    fields[key] = double
                 case .float(let float):
-                    ckRecord[key] = float
+                    fields[key] = float
                 case .bool(let bool):
-                    ckRecord[key] = bool
+                    fields[key] = bool
                 case .date(let date):
-                    ckRecord[key] = date
+                    fields[key] = date
                 case .asset(let assetURL):
                     if let assetURL {
                         ckRecord[key] = CKAsset(fileURL: cache.resolvedAssetURL(assetURL, for: self))
@@ -261,9 +263,9 @@ extension MYSyncEngine.Transaction {
                         ckRecord[key] = nil
                     }
                 case .string(let string):
-                    ckRecord[key] = string
+                    fields[key] = string
                 case .codable(let data):
-                    ckRecord[key] = data
+                    fields[key] = data
                 case .reference(let referencedRecord, let deleteRule):
                     if let referencedRecord {
                         let recordID = referencedRecord.baseCKRecord(using: cache).recordID
@@ -312,9 +314,9 @@ extension MYSyncEngine.Transaction {
                                 assertionFailure()
                         }
                     }
-                    ckRecord[key] = items as NSArray
+                    fields[key] = items as NSArray
                 case .none:
-                    ckRecord[key] = nil
+                    fields[key] = nil
             }
         }
 

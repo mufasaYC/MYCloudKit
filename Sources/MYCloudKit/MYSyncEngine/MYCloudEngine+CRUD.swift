@@ -47,9 +47,23 @@ extension MYSyncEngine {
         )
         
         var properties: [String: Transaction.RecordValue] = [:]
+        var encryptedKeys: Set<String> = []
         
         // Mapping properties of the record to transaction properties
         for (key, value) in record.myProperties {
+            var value = value
+            if case .encrypted(let wrapped) = value {
+                value = wrapped
+                switch wrapped {
+                    case .asset, .fileURL:
+                        break
+                    default:
+                        assert(wrapped.isEncryptable, "CloudKit can only encrypt numbers, strings, dates, data and arrays of these")
+                        if wrapped.isEncryptable {
+                            encryptedKeys.insert(key)
+                        }
+                }
+            }
             switch value {
                 case .int(let int):
                     properties.updateValue(.int(int), forKey: key)
@@ -174,14 +188,20 @@ extension MYSyncEngine {
                             case .array:
                                 assertionFailure("You're testing me? Array of arrays in CloudKit? Nice try! :P")
                                 continue
+                            case .encrypted:
+                                assertionFailure("Encrypt the whole array instead of its elements")
+                                continue
                         }
                     }
                     properties.updateValue(.array(recordValues), forKey: key)
+                case .encrypted:
+                    continue
             }
         }
         
         // Assigning the mapped properties to the transaction
         transaction.properties = properties
+        transaction.encryptedKeys = encryptedKeys.isEmpty ? nil : encryptedKeys
         
         return transaction
     }
@@ -331,6 +351,19 @@ extension MYSyncEngine {
                 recordTypes.contains(record.myRecordType),
                 "\(record.myRecordType) is not mentioned in MYSyncDelegate's `syncableRecordTypesInDependencyOrder()`"
             )
+        }
+    }
+}
+
+private extension MYRecordValue {
+    var isEncryptable: Bool {
+        switch self {
+            case .int, .double, .float, .bool, .date, .string, .codable:
+                return true
+            case .array(let values):
+                return values.allSatisfy(\.isEncryptable)
+            case .asset, .fileURL, .reference, .encrypted:
+                return false
         }
     }
 }

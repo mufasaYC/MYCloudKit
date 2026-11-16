@@ -24,6 +24,8 @@ public indirect enum MYRecordValue {
     case reference((any MYRecordConvertible)?, deleteRule: DeleteRule)
     /// Allowing arrays of
     case array([MYRecordValue])
+    /// Stores the wrapped value in the record's `encryptedValues`. Assets are already encrypted by CloudKit, and references can't be encrypted.
+    case encrypted(MYRecordValue)
 
     /// Specifies how a reference behaves when the target record is deleted.
     public enum DeleteRule: Codable {
