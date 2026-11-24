@@ -58,6 +58,11 @@ extension MYSyncEngine {
                     do {
                         try await syncTransactions(transactions, recordType: recordType)
                     } catch {
+                        if SyncRetryPolicy.isICloudFull(error) {
+                            await syncDeletesWhileICloudIsFull(
+                                recordTypes: Array(orderedRecordTypes.drop { $0 != recordType })
+                            )
+                        }
                         return .stopped(queueCount: self.queue.count, error: error)
                     }
                 }
@@ -427,6 +432,98 @@ extension MYSyncEngine {
         }
 
         return plan
+    }
+}
+
+extension MYSyncEngine {
+    /// Sends the queued deletes after iCloud refused a save because the user's storage is full.
+    ///
+    /// iCloud refuses saves while storage is full but still accepts deletes, and deleting is how the user
+    /// frees space. The refused save stops the pass, so without this the deletes queued behind it, such as
+    /// the photos the user removed to make room, are never sent and iCloud stays full.
+    ///
+    /// A failing delete batch doesn't stop the others, since deletes don't depend on each other. An error
+    /// that stops syncing, such as a retry-after, ends this pass like any other.
+    ///
+    /// - Parameter recordTypes: The record types to send deletes for, in dependency order, starting with
+    ///   the type whose save iCloud refused.
+    private func syncDeletesWhileICloudIsFull(recordTypes: [MYRecordType]) async {
+        logger.log("🗄️ iCloud is full — sending the queued deletes, which free space", level: .warning)
+
+        for recordType in recordTypes {
+            let transactions = Self.transactionsToSendWhileICloudIsFull(
+                queue.filter { $0.record.recordType == recordType }
+            )
+            var privateTransactions: [Transaction] = []
+            var sharedTransactions: [Transaction] = []
+            for transaction in transactions {
+                switch transaction.databaseScope(using: cache) {
+                    case .private:
+                        privateTransactions.append(transaction)
+                    case .shared:
+                        sharedTransactions.append(transaction)
+                    default:
+                        assertionFailure("Unsupported database scope")
+                }
+            }
+
+            for batch in privateTransactions.chunked(into: 200) + sharedTransactions.chunked(into: 200) {
+                do {
+                    try await syncTransactions(batch, recordType: recordType)
+                } catch let error where SyncRetryPolicy.stopsSync(error) {
+                    return
+                } catch {
+                    continue
+                }
+            }
+        }
+    }
+
+    /// The transactions of one record type to send while iCloud is full, in queue order.
+    ///
+    /// - Record deletes and child-record deletes are sent: they free space.
+    /// - A save is sent only when a later delete of the same record follows it. `planBatch` then completes
+    ///   the save without uploading it, as it would in a normal pass, so it can't re-create the record later.
+    /// - Every other save, and zone deletes, stay queued until iCloud has space again.
+    static func transactionsToSendWhileICloudIsFull(_ transactions: [Transaction]) -> [Transaction] {
+        struct RecordKey: Hashable {
+            let recordName: String
+            let zoneName: String?
+
+            init(_ transaction: Transaction) {
+                recordName = transaction.record.recordName
+                zoneName = transaction.record.zoneName
+            }
+        }
+
+        var lastDeleteIndex: [RecordKey: Int] = [:]
+        for (index, transaction) in transactions.enumerated() where transaction.operationType == .deleteRecord {
+            lastDeleteIndex[RecordKey(transaction)] = index
+        }
+
+        return transactions.enumerated().compactMap { index, transaction in
+            switch transaction.operationType {
+                case .deleteRecord, .deleteChildRecords:
+                    return transaction
+                case .createOrUpdate:
+                    guard let deleteIndex = lastDeleteIndex[RecordKey(transaction)], deleteIndex > index else {
+                        return nil
+                    }
+                    return transaction
+                case .deleteZone:
+                    return nil
+            }
+        }
+    }
+}
+
+extension MYSyncEngine.SyncRetryPolicy {
+    /// Whether a failed pass means the user's iCloud storage is full.
+    static func isICloudFull(_ error: Error) -> Bool {
+        guard case .pause(let ckError) = kind(of: error) else {
+            return false
+        }
+        return ckError.code == .quotaExceeded
     }
 }
 
