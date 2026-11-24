@@ -33,6 +33,8 @@ Use the `myProperties` dictionary to define each field using `MYRecordValue` (e.
 
 > CloudKit reserves `creationDate`, `creatorUserRecordID`, `lastModifiedUserRecordID`, `modificationDate`, `recordChangeTag`, `recordID`, and `recordType` for record metadata. MYCloudKit fails with a descriptive assertion if `myProperties` contains one of these keys. Rename the mapped key—for example, use `createdAt` instead of `creationDate`.
 
+> Wrap a value in `.encrypted(...)`, e.g. `"body": .encrypted(.string(body))`, to store it in the record's `encryptedValues` instead of a plain field. CloudKit can't change whether an existing field is encrypted, so use a new key for data that was previously synced unencrypted. Assets are already encrypted by CloudKit, and references can't be encrypted.
+
 ### Example: Syncing a Task Model
 
 ```swift
