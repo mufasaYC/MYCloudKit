@@ -211,9 +211,16 @@ extension MYSyncEngine {
             return
         }
         
-        // Add the transactions to the queue and trigger the sync operation
-        mutateQueue { $0.append(contentsOf: transactions) }
-        
+        // Add the transactions to the queue, replacing older saves of the same records, and trigger the sync operation
+        let replaced = enqueueSaves(transactions)
+        replaced.forEach { cache.removeCache(for: $0) }
+        if !replaced.isEmpty {
+            self.logger.log(
+                "🔄 Replaced \(replaced.count) older queued save(s) with the newest",
+                level: .debug
+            )
+        }
+
         // Log the action of adding the transactions
         for record in records {
             self.logger.log(
