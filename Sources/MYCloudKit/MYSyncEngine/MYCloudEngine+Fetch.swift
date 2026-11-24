@@ -470,9 +470,22 @@ extension MYSyncEngine {
             return true
         }
 
+        // A record this device also changed, with that save still queued: the delegate picks the copy that wins.
+        let resolution = Self.resolvePendingSaves(for: records, in: queue, using: cache) { serverRecord, localRecord in
+            self.delegate?.shouldKeepServerRecord(serverRecord, over: localRecord) ?? false
+        }
+        for record in resolution.keptLocal {
+            self.logger.log(
+                "🔀 Keeping this device's queued change of '\(record.recordID.recordName)' over the fetched copy",
+                level: .debug
+            )
+        }
+        let keptLocalIDs = Set(resolution.keptLocal.map(\.recordID))
+        let recordsForDelegate = records.filter { !keptLocalIDs.contains($0.recordID) }
+
         // Group records by their type and convert them into internal Record representations.
         var mappedRecords: [String: [FetchedRecord]] = [:]
-        records.forEach { record in
+        recordsForDelegate.forEach { record in
             var recordList = mappedRecords[record.recordType] ?? []
             recordList.append(.init(record: record))
             mappedRecords[record.recordType] = recordList
@@ -496,11 +509,21 @@ extension MYSyncEngine {
         }
 
         // Notify the delegate about the records to save.
-        guard let didSave = await delegate?.didReceiveRecordsToSave(orderedRecords), didSave else {
-            return false
+        if !orderedRecords.isEmpty {
+            guard let didSave = await delegate?.didReceiveRecordsToSave(orderedRecords), didSave else {
+                return false
+            }
         }
 
-        // Cache system fields for each record by record ID.
+        // iCloud's copy won: this device's queued saves of it would only put the older copy back.
+        if !resolution.droppedSaves.isEmpty {
+            let droppedIDs = Set(resolution.droppedSaves.map(\.id))
+            mutateQueue { $0.removeAll { droppedIDs.contains($0.id) } }
+            resolution.droppedSaves.forEach { cache.removeCache(for: $0) }
+        }
+
+        // Cache system fields for each record by record ID, including those whose local copy won, so its upload
+        // replaces the copy this device has now seen instead of being reported as a conflict.
         records.forEach { record in
             cache.saveEncodedSystemFields(
                 data: record.encodedSystemFields,
@@ -509,6 +532,43 @@ extension MYSyncEngine {
         }
         
         return true
+    }
+
+    /// The outcome of checking fetched records against this device's queued saves.
+    struct PendingSaveResolution {
+        /// Fetched records whose queued local change won: they are not passed to the delegate.
+        var keptLocal: [CKRecord] = []
+        /// Queued saves of records whose fetched copy won: they are removed from the queue.
+        var droppedSaves: [Transaction] = []
+    }
+
+    /// For each fetched record that also has saves waiting in `queue`, asks `keepServer` which copy wins.
+    /// Records with nothing queued are not asked about and are passed to the delegate as before.
+    static func resolvePendingSaves(
+        for records: [CKRecord],
+        in queue: [Transaction],
+        using cache: Cache,
+        keepServer: (FetchedRecord, FetchedRecord) -> Bool
+    ) -> PendingSaveResolution {
+        var resolution = PendingSaveResolution()
+        let queuedSaves = queue.filter { $0.operationType == .createOrUpdate }
+        guard !queuedSaves.isEmpty else {
+            return resolution
+        }
+        for record in records {
+            let saves = queuedSaves.filter { $0.record.recordName == record.recordID.recordName }
+            guard let newest = saves.last,
+                  let localRecord = newest.asCKRecord(using: cache),
+                  localRecord.recordID.zoneID.zoneName == record.recordID.zoneID.zoneName else {
+                continue
+            }
+            if keepServer(FetchedRecord(record: record), FetchedRecord(record: localRecord)) {
+                resolution.droppedSaves.append(contentsOf: saves)
+            } else {
+                resolution.keptLocal.append(record)
+            }
+        }
+        return resolution
     }
     
     /// Processes and handles a list of CKRecord identifiers that were successfully deleted.
